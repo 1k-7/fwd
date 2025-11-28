@@ -1,3 +1,4 @@
+# mistaldrin/fwd/fwd-dawn-improve-v2/plugins/regix.py
 import re
 import asyncio
 import logging
@@ -37,9 +38,32 @@ async def run_forwarding_task(bot, user_id, frwd_id, bot_id, sts, message_obj):
         client_instance = await start_clone_bot(CLIENT.client(_bot_data), _bot_data)
         
         await msg_edit(message_obj, "Accessing channels...")
-        from_chat_details = await client_instance.get_chat(i.FROM)
-        to_chat_details = await client_instance.get_chat(i.TO)
-        from_title, to_title = from_chat_details.title, to_chat_details.title
+
+        # --- SAFE PEER RESOLUTION ---
+        async def get_chat_safe(chat_id):
+            try:
+                return await client_instance.get_chat(chat_id)
+            except PeerIdInvalid:
+                # If ID is not in cache, scan dialogs to populate it
+                logger.info(f"Peer {chat_id} not found in cache. Scanning dialogs...")
+                async for dialog in client_instance.get_dialogs(limit=500):
+                    if dialog.chat.id == chat_id:
+                        return dialog.chat
+                raise ValueError(f"Peer {chat_id} not found in recent dialogs. Please interact with it first.")
+
+        try:
+            from_chat_details = await get_chat_safe(i.FROM)
+            to_chat_details = await get_chat_safe(i.TO)
+        except Exception as e:
+            logger.error(f"Failed to resolve peers for task {frwd_id}: {e}")
+            await msg_edit(message_obj, f"<b>Connection Error:</b>\n`{e}`\n\nTask stopped.")
+            await stop(client_instance, user_id, frwd_id)
+            return
+        
+        # Robust title extraction (handles Users/Private chats where title is None)
+        from_title = from_chat_details.title or f"{from_chat_details.first_name} {from_chat_details.last_name or ''}".strip()
+        to_title = to_chat_details.title or f"{to_chat_details.first_name} {to_chat_details.last_name or ''}".strip()
+        # ----------------------------
 
         if user_id not in temp.ACTIVE_TASKS: temp.ACTIVE_TASKS[user_id] = {}
         temp.ACTIVE_TASKS[user_id][frwd_id] = {"process": message_obj, "details": {"type": "Forwarding", "from": from_title, "to": to_title}}
