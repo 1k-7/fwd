@@ -1,4 +1,5 @@
-# mistaldrin/fwd/fwd-dawn-improve-v2/plugins/utils.py
+# mistaldrin/fwd/fwd-DawnUltra/plugins/utils.py
+
 import re
 import random
 import time as tm
@@ -78,7 +79,6 @@ class STS:
             self.data[self.id][key] += value
 
     async def get_data(self, user_id, bot_id=None):
-        # If bot_id is not passed, get it from the temp session dict (for new tasks)
         if not bot_id:
             bot_id = temp.FORWARD_BOT_ID.get(user_id)
             if not bot_id:
@@ -100,7 +100,7 @@ class STS:
             'forward_delay': configs.get('forward_delay', 0.5)
         }, configs.get('protect'), button
 
-async def start_range_selection(bot, message: Message, from_chat_id, from_title, to_chat_id, start_id, end_id, final_callback_prefix="fwd_final"):
+async def start_range_selection(bot, message: Message, from_chat_id, from_title, to_chat_id, start_id, end_id, final_callback_prefix="fwd_final", mode="standard"):
     session_id = str(uuid4())
     temp.RANGE_SESSIONS[session_id] = {
         'user_id': message.chat.id,
@@ -113,7 +113,8 @@ async def start_range_selection(bot, message: Message, from_chat_id, from_title,
         'order': 'asc',
         'final_callback': final_callback_prefix,
         'original_message_id': message.id,
-        'message_id': None
+        'message_id': None,
+        'mode': mode 
     }
     await update_range_message(bot, session_id)
 

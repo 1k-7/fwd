@@ -1,4 +1,5 @@
-# mistaldrin/fwd/fwd-dawn-improve-v2/plugins/public.py
+# mistaldrin/fwd/fwd-DawnUltra/plugins/public.py
+
 import re
 import asyncio
 import logging
@@ -27,7 +28,14 @@ def parse_message_input(message):
         if open_msg_match:
             chat_id = int(open_msg_match.group(1))
             msg_id = int(open_msg_match.group(2)) if open_msg_match.group(2) else None
-            return chat_id, msg_id, None
+            # Return a special flag for mode
+            return chat_id, msg_id, "id_scan"
+
+        # Check for custom chat:// scheme
+        chat_scheme_match = re.search(r"chat://@?([\w\d_]+)", message.text)
+        if chat_scheme_match:
+             # We return the username/id string. Resolution happens in state handler.
+             return chat_scheme_match.group(1), None, "id_scan"
 
     if message.text and not message.forward_date:
         regex = re.compile(r"(https://)?(t\.me/|telegram\.me/|telegram\.dog/)(c/)?(\d+|[a-zA-Z_0-9]+)/(\d+)$")
@@ -97,7 +105,6 @@ async def stateful_message_handler(bot: Client, message: Message):
     current_state = state_info.get("state")
     prompt_id = state_info.get("prompt_message_id")
 
-    # Universal /cancel
     if message.text and message.text.lower() == "/cancel":
         if prompt_id:
             try: await bot.delete_messages(user_id, prompt_id)
@@ -105,7 +112,6 @@ async def stateful_message_handler(bot: Client, message: Message):
         temp.USER_STATES.pop(user_id, None)
         return await message.reply(Translation.CANCEL)
 
-    # Clean up prompts and user message
     if prompt_id:
         try: await bot.delete_messages(user_id, prompt_id)
         except: pass
@@ -114,11 +120,18 @@ async def stateful_message_handler(bot: Client, message: Message):
     
     temp.USER_STATES.pop(user_id, None)
 
-    # --- FORWARDING WORKFLOW ---
     if current_state == "awaiting_source":
         to_chat_id = state_info["to_chat_id"]
-        from_chat_id, end_id, error = parse_message_input(message)
-        if error: return await bot.send_message(user_id, error)
+        # parse_message_input now returns (chat_id, end_id, mode_flag/error)
+        parsed_res = parse_message_input(message)
+        from_chat_id, end_id, info = parsed_res
+        
+        # Check if info is an error string or a mode flag
+        mode = "standard"
+        if info == "id_scan":
+            mode = "id_scan"
+        elif info: # It's an error message
+             return await bot.send_message(user_id, info)
         
         status_msg = await bot.send_message(user_id, "`Verifying Source...`")
         from_title = None
@@ -135,31 +148,38 @@ async def stateful_message_handler(bot: Client, message: Message):
                 return await bot.send_message(user_id, "Selected bot/userbot not found in DB.")
 
             async with CLIENT().client(_bot_data) as client_instance:
-                # 1. Resolve Peer & Get Title
                 chat_info = None
                 try:
-                    # Attempt direct fetch first
                     chat_info = await client_instance.get_chat(from_chat_id)
                 except PeerIdInvalid:
-                    # Fallback: Iterate dialogs to "meet" the peer if unknown to session
+                    # Fallback scan for invalid peers
                     async for dialog in client_instance.get_dialogs(limit=500):
-                        if dialog.chat.id == from_chat_id:
+                        if (isinstance(from_chat_id, int) and dialog.chat.id == from_chat_id) or \
+                           (isinstance(from_chat_id, str) and dialog.chat.username and dialog.chat.username.lower() == from_chat_id.lower()):
                             chat_info = dialog.chat
+                            from_chat_id = dialog.chat.id # Ensure we have the ID now
                             break
-                    
                     if not chat_info:
                          raise ValueError("Peer not found in userbot dialogs (checked last 500).")
                 except Exception as e:
-                     raise ValueError(f"Could not access chat/user: {e}")
+                     # Attempt to resolve username if it's a string
+                     if isinstance(from_chat_id, str):
+                         try:
+                             chat_info = await client_instance.get_chat(from_chat_id)
+                             from_chat_id = chat_info.id
+                         except Exception as ie:
+                             raise ValueError(f"Could not resolve username: {ie}")
+                     else:
+                        raise ValueError(f"Could not access chat/user: {e}")
 
                 from_title = chat_info.title or f"{chat_info.first_name} {chat_info.last_name or ''}".strip()
                 
-                # 2. Fetch Latest Message if end_id is missing
+                # If mode is id_scan, we generally want ALL messages if end_id isn't specified,
+                # or up to the specified end_id. 
                 if end_id is None:
                     async for msg in client_instance.get_chat_history(from_chat_id, limit=1):
                         end_id = msg.id
                         break
-                    
                     if not end_id:
                         raise ValueError("Could not fetch history (Chat might be empty).")
         
@@ -168,11 +188,10 @@ async def stateful_message_handler(bot: Client, message: Message):
             return await bot.send_message(user_id, f"Error verifying source: `{e}`")
 
         await status_msg.delete()
-        
         if not from_title: from_title = f"Chat: {from_chat_id}"
         
-        # Start selection from 1 to end_id
-        await start_range_selection(bot, message, from_chat_id, from_title, to_chat_id, 1, end_id)
+        # Save the mode in the session for later retrieval
+        await start_range_selection(bot, message, from_chat_id, from_title, to_chat_id, 1, end_id, mode=mode)
 
     elif current_state == "awaiting_range_edit":
         session_id, value_type = state_info.get("session_id"), state_info.get("value_type")
@@ -185,7 +204,6 @@ async def stateful_message_handler(bot: Client, message: Message):
             await bot.send_message(user_id, "Invalid ID provided. The process has been cancelled.")
             temp.RANGE_SESSIONS.pop(session_id, None)
 
-    # --- SETTINGS WORKFLOW ---
     elif current_state == "awaiting_channel_forward":
         if not message.forward_date: return await bot.send_message(user_id, "Not a forwarded message. (・_・;)\nProcess cancelled.")
         chat_id, title = message.forward_from_chat.id, message.forward_from_chat.title
@@ -204,7 +222,7 @@ async def stateful_message_handler(bot: Client, message: Message):
         value = None
         if message.text.lower() == "/reset": value = None
         elif setting_key == "file_size":
-            try: value = float(message.text) * 1024 * 1024 # MB to bytes
+            try: value = float(message.text) * 1024 * 1024
             except ValueError: return await bot.send_message(user_id, "Invalid number for file size.")
         elif setting_key == "size_limit":
             if message.text.lower() not in ["above", "below"]: return await bot.send_message(user_id, "Invalid option. Please enter 'above' or 'below'.")
@@ -213,7 +231,6 @@ async def stateful_message_handler(bot: Client, message: Message):
         await update_configs(user_id, setting_key, value)
         await bot.send_message(user_id, f"✅ **{setting_key.replace('_', ' ').title()}** has been updated.")
 
-    # --- UNEQIFY WORKFLOW ---
     elif current_state == "awaiting_unequify_manual_target":
         userbot_id = temp.UNEQUIFY_USERBOT_ID.get(user_id)
         if not userbot_id: return await bot.send_message(user_id, "Error: Userbot selection lost. Please start over.")
@@ -267,7 +284,11 @@ async def show_final_confirmation(bot, session_id):
     to_title = next((c['title'] for c in channels if c['chat_id'] == session['to_chat_id']), 'Unknown')
     message_range_text = f"{min(session['start_id'], session['end_id'])} to {max(session['start_id'], session['end_id'])}"
     forward_id = str(uuid4())
-    STS(forward_id).store(From=session['from_chat_id'], to=session['to_chat_id'], start_id=session['start_id'], end_id=session['end_id'])
+    
+    sts = STS(forward_id).store(From=session['from_chat_id'], to=session['to_chat_id'], start_id=session['start_id'], end_id=session['end_id'])
+    # Inject the scan mode into STS data
+    sts.data[forward_id]['mode'] = session.get('mode', 'standard')
+    
     await bot.send_message(user_id, Translation.DOUBLE_CHECK.format(
             botname=_bot.get('name', 'N/A'), botuname=_bot.get('username', ''),
             from_chat=session['from_title'], to_chat=to_title, message_range=message_range_text),

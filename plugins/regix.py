@@ -1,4 +1,5 @@
-# mistaldrin/fwd/fwd-dawn-improve-v2/plugins/regix.py
+# mistaldrin/fwd/fwd-DawnUltra/plugins/regix.py
+
 import re
 import asyncio
 import logging
@@ -39,17 +40,21 @@ async def run_forwarding_task(bot, user_id, frwd_id, bot_id, sts, message_obj):
         
         await msg_edit(message_obj, "Accessing channels...")
 
-        # --- SAFE PEER RESOLUTION ---
         async def get_chat_safe(chat_id):
             try:
                 return await client_instance.get_chat(chat_id)
             except PeerIdInvalid:
-                # If ID is not in cache, scan dialogs to populate it
                 logger.info(f"Peer {chat_id} not found in cache. Scanning dialogs...")
                 async for dialog in client_instance.get_dialogs(limit=500):
                     if dialog.chat.id == chat_id:
                         return dialog.chat
                 raise ValueError(f"Peer {chat_id} not found in recent dialogs. Please interact with it first.")
+            except Exception as e:
+                # Retry if username
+                 if isinstance(chat_id, str):
+                     try: return await client_instance.get_chat(chat_id)
+                     except: pass
+                 raise e
 
         try:
             from_chat_details = await get_chat_safe(i.FROM)
@@ -60,10 +65,8 @@ async def run_forwarding_task(bot, user_id, frwd_id, bot_id, sts, message_obj):
             await stop(client_instance, user_id, frwd_id)
             return
         
-        # Robust title extraction (handles Users/Private chats where title is None)
         from_title = from_chat_details.title or f"{from_chat_details.first_name} {from_chat_details.last_name or ''}".strip()
         to_title = to_chat_details.title or f"{to_chat_details.first_name} {to_chat_details.last_name or ''}".strip()
-        # ----------------------------
 
         if user_id not in temp.ACTIVE_TASKS: temp.ACTIVE_TASKS[user_id] = {}
         temp.ACTIVE_TASKS[user_id][frwd_id] = {"process": message_obj, "details": {"type": "Forwarding", "from": from_title, "to": to_title}}
@@ -76,21 +79,63 @@ async def run_forwarding_task(bot, user_id, frwd_id, bot_id, sts, message_obj):
         
         start_id = min(i.start_id, i.end_id)
         end_id = max(i.start_id, i.end_id)
-        current_id_to_process = start_id + i.fetched
+        
+        # --- MODE SELECTION ---
+        task_mode = sts.data[frwd_id].get('mode', 'standard')
+        message_ids_to_process = []
+        
+        if task_mode == "id_scan":
+             await msg_edit(message_obj, "Scanning chat history for valid messages... (This may take a moment)")
+             try:
+                 # Fetch ALL history IDs to ensure we only target this chat and handle sparse global IDs
+                 valid_ids = []
+                 async for m in client_instance.get_chat_history(i.FROM):
+                     if start_id <= m.id <= end_id:
+                         valid_ids.append(m.id)
+                 
+                 # Sort Oldest -> Newest
+                 valid_ids.sort()
+                 message_ids_to_process = valid_ids
+                 sts.data[frwd_id]['total'] = len(valid_ids) # Update total to accurate count
+                 # Reset fetched to 0 relative to this new list?
+                 # Actually STS fetches tracks *processed*, so if we resume, we might need logic.
+                 # For now, simplistic resume: filter out already processed?
+                 # The 'fetched' in STS is count. We need index.
+                 # If we are resuming 'id_scan', we might re-scan.
+                 # Let's just process from 'fetched' index.
+                 message_ids_to_process = message_ids_to_process[i.fetched:]
+             except Exception as e:
+                 logger.error(f"Error scanning history: {e}")
+                 await msg_edit(message_obj, f"Error scanning history: {e}")
+                 return
+        else:
+             # Standard range mode
+             # We generate chunks in the loop, but for consistency let's define the generator logic below
+             pass 
 
-        # Loop directly over message IDs in chunks, improving memory efficiency
-        for chunk_base_id in range(current_id_to_process, end_id + 1, 200):
+        # --- PROCESSING LOOP ---
+        
+        # Helper to yield chunks
+        def chunk_generator():
+            if task_mode == "id_scan":
+                for k in range(0, len(message_ids_to_process), 200):
+                    yield message_ids_to_process[k : k + 200]
+            else:
+                 current_id_to_process = start_id + i.fetched
+                 for k in range(current_id_to_process, end_id + 1, 200):
+                     yield list(range(k, min(k + 200, end_id + 1)))
+
+        for chunk in chunk_generator():
             if temp.CANCEL.get(frwd_id):
                 final_status = "cancelled"
                 break
             
-            chunk = list(range(chunk_base_id, min(chunk_base_id + 200, end_id + 1)))
             if not chunk: continue
 
             try:
                 messages = await client_instance.get_messages(i.FROM, chunk)
             except Exception as e_fetch:
-                logger.error(f"Could not fetch message chunk {chunk}: {e_fetch}")
+                logger.error(f"Could not fetch message chunk: {e_fetch}")
                 sts.add('failed', len(chunk)); sts.add('fetched', len(chunk))
                 continue
 
@@ -101,6 +146,14 @@ async def run_forwarding_task(bot, user_id, frwd_id, bot_id, sts, message_obj):
                 
                 sts.add('fetched')
                 
+                # --- CRITICAL FIX: Cross-Chat Forwarding Prevention ---
+                # Verify that the message actually belongs to the source chat.
+                # Use str(id) comparison for robustness against some int/str nuances, though normally int.
+                if message and message.chat and message.chat.id != from_chat_details.id:
+                     # Skip messages from other chats (Ghost/Global ID artifact)
+                     continue 
+                # ------------------------------------------------------
+
                 if not message or message.empty or message.service or (message.media and str(message.media.value) in filters_to_apply) or (not message.media and "text" in filters_to_apply):
                     sts.add('filtered'); continue
 
@@ -123,8 +176,8 @@ async def run_forwarding_task(bot, user_id, frwd_id, bot_id, sts, message_obj):
 
                 if not forward_tag: await asyncio.sleep(delay)
             
-            # Save progress at the end of each chunk for better resume accuracy
-            await db.save_task(frwd_id, {'fetched': sts.get('fetched')})
+            # Save progress
+            await db.save_task(frwd_id, {'fetched': sts.get('fetched'), 'mode': task_mode})
 
         if forward_tag and forward_batch and not temp.CANCEL.get(frwd_id):
             await client_instance.forward_messages(chat_id=i.TO, from_chat_id=i.FROM, message_ids=forward_batch, protect_content=protect)
@@ -159,11 +212,15 @@ async def pub_(bot, cb):
     bot_id = temp.FORWARD_BOT_ID.get(user_id)
     if not bot_id:
         return await m.edit("Bot selection lost from session. Please restart.")
+    
+    # Preserve the mode if it was set in STS data
+    current_mode = sts.data[frwd_id].get('mode', 'standard')
 
     task_details = {
         'id': frwd_id, 'user_id': user_id, 'bot_id': bot_id,
         'from_chat': i.FROM, 'to_chat': i.TO,
-        'start_id': i.start_id, 'end_id': i.end_id, 'fetched': 0
+        'start_id': i.start_id, 'end_id': i.end_id, 'fetched': 0,
+        'mode': current_mode
     }
     await db.save_task(frwd_id, task_details)
     await run_forwarding_task(bot, user_id, frwd_id, bot_id, sts, m)
@@ -178,6 +235,7 @@ async def resume_forwarding(bot, task_data):
         start_id=task_data['start_id'], end_id=task_data['end_id']
     )
     sts.data[frwd_id]['fetched'] = task_data.get('fetched', 0)
+    sts.data[frwd_id]['mode'] = task_data.get('mode', 'standard')
     
     try:
         m = await bot.send_message(user_id, f"🔄 Resuming task from `{task_data['from_chat']}`...")
