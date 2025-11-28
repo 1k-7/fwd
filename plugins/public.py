@@ -22,7 +22,6 @@ def parse_message_input(message):
 
     if message.text:
         # Check for openmessage link: tg://openmessage?user_id=...&message_id=...
-        # Returns chat_id and message_id (or None if message_id is missing)
         open_msg_match = re.search(r"tg://openmessage\?user_id=(\d+)(?:&message_id=(\d+))?", message.text)
         if open_msg_match:
             chat_id = int(open_msg_match.group(1))
@@ -120,37 +119,49 @@ async def stateful_message_handler(bot: Client, message: Message):
         from_chat_id, end_id, error = parse_message_input(message)
         if error: return await bot.send_message(user_id, error)
         
-        # If end_id is missing (from openmessage link), fetch the latest message ID
-        if end_id is None:
-             status_msg = await bot.send_message(user_id, "`Fetching latest message...`")
-             try:
-                 bot_id = temp.FORWARD_BOT_ID.get(user_id)
-                 if not bot_id:
-                     await status_msg.delete()
-                     return await bot.send_message(user_id, "Bot selection lost. Please restart.")
-                 
-                 _bot_data = await db.get_bot(user_id, bot_id)
-                 if not _bot_data:
-                     await status_msg.delete()
-                     return await bot.send_message(user_id, "Selected bot/userbot not found in DB.")
+        status_msg = await bot.send_message(user_id, "`Verifying Source...`")
+        from_title = None
 
-                 async with CLIENT().client(_bot_data) as client_instance:
-                      # Fetch the last message to determine end_id
-                      async for msg in client_instance.get_chat_history(from_chat_id, limit=1):
-                          end_id = msg.id
-                          break
-                 
-                 if not end_id:
-                     await status_msg.delete()
-                     return await bot.send_message(user_id, "Could not fetch history from this chat.")
-                     
-                 await status_msg.delete()
-             except Exception as e:
-                 await status_msg.delete()
-                 return await bot.send_message(user_id, f"Error fetching chat history: {e}")
+        # Resolve the peer (and end_id if missing) using the SELECTED BOT/USERBOT
+        # This is critical for raw IDs (like from tg://openmessage) that the main bot instance doesn't know.
+        try:
+            bot_id = temp.FORWARD_BOT_ID.get(user_id)
+            if not bot_id:
+                await status_msg.delete()
+                return await bot.send_message(user_id, "Bot selection lost. Please restart.")
+            
+            _bot_data = await db.get_bot(user_id, bot_id)
+            if not _bot_data:
+                await status_msg.delete()
+                return await bot.send_message(user_id, "Selected bot/userbot not found in DB.")
 
-        try: from_title = (await bot.get_chat(from_chat_id)).title
-        except Exception: from_title = f"Chat: {from_chat_id}"
+            async with CLIENT().client(_bot_data) as client_instance:
+                # 1. Resolve Peer & Get Title (Crucial for PeerIdInvalid prevention)
+                try:
+                    chat_info = await client_instance.get_chat(from_chat_id)
+                    from_title = chat_info.title or f"{chat_info.first_name} {chat_info.last_name or ''}".strip()
+                except Exception as e:
+                    logger.error(f"Failed to resolve peer {from_chat_id}: {e}")
+                    # If we can't resolve it, we can't proceed with this specific client
+                    raise ValueError(f"Could not access chat/user: {e}")
+
+                # 2. Fetch Latest Message if end_id is missing
+                if end_id is None:
+                    async for msg in client_instance.get_chat_history(from_chat_id, limit=1):
+                        end_id = msg.id
+                        break
+                    
+                    if not end_id:
+                        raise ValueError("Could not fetch history (Chat might be empty).")
+        
+        except Exception as e:
+            await status_msg.delete()
+            return await bot.send_message(user_id, f"Error verifying source: `{e}`")
+
+        await status_msg.delete()
+        
+        # Fallback title if something went weird but didn't crash
+        if not from_title: from_title = f"Chat: {from_chat_id}"
         
         # Start selection from 1 to end_id
         await start_range_selection(bot, message, from_chat_id, from_title, to_chat_id, 1, end_id)
