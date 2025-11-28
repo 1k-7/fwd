@@ -11,6 +11,7 @@ from translation import Translation
 from .test import CLIENT, update_configs
 from .unequify import process_unequify_target
 from pyrogram import Client, filters, enums
+from pyrogram.errors import PeerIdInvalid
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery, Message
 
 logger = logging.getLogger(__name__)
@@ -122,8 +123,6 @@ async def stateful_message_handler(bot: Client, message: Message):
         status_msg = await bot.send_message(user_id, "`Verifying Source...`")
         from_title = None
 
-        # Resolve the peer (and end_id if missing) using the SELECTED BOT/USERBOT
-        # This is critical for raw IDs (like from tg://openmessage) that the main bot instance doesn't know.
         try:
             bot_id = temp.FORWARD_BOT_ID.get(user_id)
             if not bot_id:
@@ -136,15 +135,25 @@ async def stateful_message_handler(bot: Client, message: Message):
                 return await bot.send_message(user_id, "Selected bot/userbot not found in DB.")
 
             async with CLIENT().client(_bot_data) as client_instance:
-                # 1. Resolve Peer & Get Title (Crucial for PeerIdInvalid prevention)
+                # 1. Resolve Peer & Get Title
+                chat_info = None
                 try:
+                    # Attempt direct fetch first
                     chat_info = await client_instance.get_chat(from_chat_id)
-                    from_title = chat_info.title or f"{chat_info.first_name} {chat_info.last_name or ''}".strip()
+                except PeerIdInvalid:
+                    # Fallback: Iterate dialogs to "meet" the peer if unknown to session
+                    async for dialog in client_instance.get_dialogs(limit=500):
+                        if dialog.chat.id == from_chat_id:
+                            chat_info = dialog.chat
+                            break
+                    
+                    if not chat_info:
+                         raise ValueError("Peer not found in userbot dialogs (checked last 500).")
                 except Exception as e:
-                    logger.error(f"Failed to resolve peer {from_chat_id}: {e}")
-                    # If we can't resolve it, we can't proceed with this specific client
-                    raise ValueError(f"Could not access chat/user: {e}")
+                     raise ValueError(f"Could not access chat/user: {e}")
 
+                from_title = chat_info.title or f"{chat_info.first_name} {chat_info.last_name or ''}".strip()
+                
                 # 2. Fetch Latest Message if end_id is missing
                 if end_id is None:
                     async for msg in client_instance.get_chat_history(from_chat_id, limit=1):
@@ -160,7 +169,6 @@ async def stateful_message_handler(bot: Client, message: Message):
 
         await status_msg.delete()
         
-        # Fallback title if something went weird but didn't crash
         if not from_title: from_title = f"Chat: {from_chat_id}"
         
         # Start selection from 1 to end_id
