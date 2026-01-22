@@ -11,7 +11,7 @@ from .test import CLIENT, start_clone_bot
 from config import Config, temp
 from translation import Translation
 from pyrogram import Client, filters
-from pyrogram.enums import ParseMode
+from pyrogram.enums import ParseMode, MessageMediaType
 from pyrogram.errors import FloodWait, MessageNotModified, RPCError, MediaEmpty, UserIsBlocked, PeerIdInvalid
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery, Message
 
@@ -37,7 +37,7 @@ async def run_forwarding_task(bot, user_id, frwd_id, bot_id, sts, message_obj):
         
         # Determine mode for UI
         is_bot_mode = _bot_data.get('is_bot', False)
-        mode_label = "🤖 Bot (Copy Mode)" if is_bot_mode else "👤 Userbot (No Tag)"
+        mode_label = "🤖 Bot (File ID Mode)" if is_bot_mode else "👤 Userbot (Direct Copy)"
 
         await msg_edit(message_obj, "Starting client...")
         client_instance = await start_clone_bot(CLIENT.client(_bot_data), _bot_data)
@@ -153,20 +153,48 @@ async def run_forwarding_task(bot, user_id, frwd_id, bot_id, sts, message_obj):
                     sts.add('filtered'); continue
 
                 try:
-                    # --- HYBRID APPROACH IMPLEMENTATION ---
-                    # 1. Userbot: "Simply forward without forward tag" -> message.copy()
-                    # 2. Bot: "Fetch file id and send" -> message.copy() (Handles fetching ID/input media automatically)
-                    # We bypass the 'forward_tag' batching logic entirely to ensure reliability and bypass restrictions.
+                    capt = custom_caption(message, caption)
                     
-                    await message.copy(
-                        chat_id=i.TO, 
-                        caption=custom_caption(message, caption), 
-                        reply_markup=button, 
-                        protect_content=protect
-                    )
-                    sts.add('total_files')
+                    if is_bot_mode:
+                        # --- BOT: RESTRICTION BYPASS (FILE ID FETCH & SEND) ---
+                        # Bots often fail to 'copy' from restricted channels. 
+                        # We explicitly fetch the file_id and send it as a new message.
+                        if message.media:
+                            if message.photo:
+                                await client_instance.send_photo(i.TO, message.photo.file_id, caption=capt, reply_markup=button, protect_content=protect)
+                            elif message.video:
+                                await client_instance.send_video(i.TO, message.video.file_id, caption=capt, reply_markup=button, protect_content=protect)
+                            elif message.document:
+                                await client_instance.send_document(i.TO, message.document.file_id, caption=capt, reply_markup=button, protect_content=protect)
+                            elif message.audio:
+                                await client_instance.send_audio(i.TO, message.audio.file_id, caption=capt, reply_markup=button, protect_content=protect)
+                            elif message.voice:
+                                await client_instance.send_voice(i.TO, message.voice.file_id, caption=capt, reply_markup=button, protect_content=protect)
+                            elif message.sticker:
+                                await client_instance.send_sticker(i.TO, message.sticker.file_id, reply_markup=button, protect_content=protect)
+                            elif message.animation:
+                                await client_instance.send_animation(i.TO, message.animation.file_id, caption=capt, reply_markup=button, protect_content=protect)
+                            elif message.video_note:
+                                await client_instance.send_video_note(i.TO, message.video_note.file_id, reply_markup=button, protect_content=protect)
+                            else:
+                                # Fallback for complex types (polls, etc) - Try copy, might fail on restricted
+                                try: await message.copy(i.TO, caption=capt, reply_markup=button, protect_content=protect)
+                                except: sts.add('failed'); continue
+                            
+                            sts.add('total_files')
+
+                        elif message.text:
+                            # For text, we just send the raw text content
+                            await client_instance.send_message(i.TO, message.text.html, reply_markup=button, disable_web_page_preview=True, protect_content=protect)
+                            sts.add('total_files')
+
+                    else:
+                        # --- USERBOT: DIRECT COPY ---
+                        # Userbots are less restricted and 'copy' works better to preserve structure (like albums)
+                        await message.copy(chat_id=i.TO, caption=capt, reply_markup=button, protect_content=protect)
+                        sts.add('total_files')
                     
-                    await asyncio.sleep(delay)
+                    if not forward_tag: await asyncio.sleep(delay)
                     
                 except FloodWait as e:
                     await asyncio.sleep(e.value + 2)
