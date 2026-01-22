@@ -1,7 +1,3 @@
-# MrSyD
-# Telegram Channel @Bot_Cracker
-# Developer @syd_xyz
-
 import asyncio
 import logging
 import logging.config
@@ -110,7 +106,3 @@ class Bot(Client):
                 await db.delete_task(task.get('id')) # Delete broken task
         if resumed_count > 0:
             self.log.info(f"Successfully resumed {resumed_count} tasks.")
-
-# MrSyD
-# Telegram Channel @Bot_Cracker
-# Developer @syd_xyz

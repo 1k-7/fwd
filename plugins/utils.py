@@ -1,5 +1,3 @@
-# mistaldrin/fwd/fwd-DawnUltra/plugins/utils.py
-
 import re
 import random
 import time as tm

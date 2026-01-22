@@ -1,10 +1,3 @@
-# MrSyD
-# Telegram Channel @Bot_Cracker
-# Developer @syd_xyz
-
-
-
-
 import os, sys, asyncio, time
 from config import *
 from database import *
@@ -47,12 +40,3 @@ async def donate(client, message):
         			[InlineKeyboardButton("🦋 Admin",url = "https://t.me/partDevil"), 
         			InlineKeyboardButton("✖️ Close",callback_data = "close_btn") ]])
 	await message.reply_text(text = text,reply_markup = keybord)
-
-
-
-
-
-
-# MrSyD
-# Telegram Channel @Bot_Cracker
-# Developer @syd_xyz

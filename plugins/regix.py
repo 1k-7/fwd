@@ -34,6 +34,10 @@ async def run_forwarding_task(bot, user_id, frwd_id, bot_id, sts, message_obj):
 
         delay = data_params.get('forward_delay', 0.5)
         filters_to_apply = data_params.get('filters', [])
+        
+        # Determine mode for UI
+        is_bot_mode = _bot_data.get('is_bot', False)
+        mode_label = "🤖 Bot (Copy Mode)" if is_bot_mode else "👤 Userbot (No Tag)"
 
         await msg_edit(message_obj, "Starting client...")
         client_instance = await start_clone_bot(CLIENT.client(_bot_data), _bot_data)
@@ -72,10 +76,11 @@ async def run_forwarding_task(bot, user_id, frwd_id, bot_id, sts, message_obj):
         temp.ACTIVE_TASKS[user_id][frwd_id] = {"process": message_obj, "details": {"type": "Forwarding", "from": from_title, "to": to_title}}
         
         final_status = "error"
-        forward_batch = []
         last_update_time = time.time()
 
-        await edit_progress(message_obj, sts, "running")
+        # Pass extra info for the revamped UI
+        extra_info = {'mode': mode_label, 'from': from_title, 'to': to_title}
+        await edit_progress(message_obj, sts, "running", extra_info)
         
         start_id = min(i.start_id, i.end_id)
         end_id = max(i.start_id, i.end_id)
@@ -87,35 +92,24 @@ async def run_forwarding_task(bot, user_id, frwd_id, bot_id, sts, message_obj):
         if task_mode == "id_scan":
              await msg_edit(message_obj, "Scanning chat history for valid messages... (This may take a moment)")
              try:
-                 # Fetch ALL history IDs to ensure we only target this chat and handle sparse global IDs
                  valid_ids = []
                  async for m in client_instance.get_chat_history(i.FROM):
                      if start_id <= m.id <= end_id:
                          valid_ids.append(m.id)
                  
-                 # Sort Oldest -> Newest
                  valid_ids.sort()
                  message_ids_to_process = valid_ids
-                 sts.data[frwd_id]['total'] = len(valid_ids) # Update total to accurate count
-                 # Reset fetched to 0 relative to this new list?
-                 # Actually STS fetches tracks *processed*, so if we resume, we might need logic.
-                 # For now, simplistic resume: filter out already processed?
-                 # The 'fetched' in STS is count. We need index.
-                 # If we are resuming 'id_scan', we might re-scan.
-                 # Let's just process from 'fetched' index.
+                 sts.data[frwd_id]['total'] = len(valid_ids) 
                  message_ids_to_process = message_ids_to_process[i.fetched:]
              except Exception as e:
                  logger.error(f"Error scanning history: {e}")
                  await msg_edit(message_obj, f"Error scanning history: {e}")
                  return
         else:
-             # Standard range mode
-             # We generate chunks in the loop, but for consistency let's define the generator logic below
              pass 
 
         # --- PROCESSING LOOP ---
         
-        # Helper to yield chunks
         def chunk_generator():
             if task_mode == "id_scan":
                 for k in range(0, len(message_ids_to_process), 200):
@@ -140,33 +134,40 @@ async def run_forwarding_task(bot, user_id, frwd_id, bot_id, sts, message_obj):
                 continue
 
             for message in messages:
-                if time.time() - last_update_time > 15:
-                    await edit_progress(message_obj, sts, "running")
+                # --- INSTANT CANCEL CHECK ---
+                if temp.CANCEL.get(frwd_id):
+                    final_status = "cancelled"
+                    break
+                # ----------------------------
+
+                if time.time() - last_update_time > 10: # Faster UI updates
+                    await edit_progress(message_obj, sts, "running", extra_info)
                     last_update_time = time.time()
                 
                 sts.add('fetched')
                 
-                # --- CRITICAL FIX: Cross-Chat Forwarding Prevention ---
-                # Verify that the message actually belongs to the source chat.
-                # Use str(id) comparison for robustness against some int/str nuances, though normally int.
                 if message and message.chat and message.chat.id != from_chat_details.id:
-                     # Skip messages from other chats (Ghost/Global ID artifact)
                      continue 
-                # ------------------------------------------------------
 
                 if not message or message.empty or message.service or (message.media and str(message.media.value) in filters_to_apply) or (not message.media and "text" in filters_to_apply):
                     sts.add('filtered'); continue
 
                 try:
-                    if forward_tag:
-                        forward_batch.append(message.id)
-                        if len(forward_batch) >= 100:
-                            await client_instance.forward_messages(chat_id=i.TO, from_chat_id=i.FROM, message_ids=forward_batch, protect_content=protect)
-                            sts.add('total_files', len(forward_batch)); forward_batch.clear()
-                            await asyncio.sleep(max(delay, 2))
-                    else:
-                        await message.copy(chat_id=i.TO, caption=custom_caption(message, caption), reply_markup=button, protect_content=protect)
-                        sts.add('total_files')
+                    # --- HYBRID APPROACH IMPLEMENTATION ---
+                    # 1. Userbot: "Simply forward without forward tag" -> message.copy()
+                    # 2. Bot: "Fetch file id and send" -> message.copy() (Handles fetching ID/input media automatically)
+                    # We bypass the 'forward_tag' batching logic entirely to ensure reliability and bypass restrictions.
+                    
+                    await message.copy(
+                        chat_id=i.TO, 
+                        caption=custom_caption(message, caption), 
+                        reply_markup=button, 
+                        protect_content=protect
+                    )
+                    sts.add('total_files')
+                    
+                    await asyncio.sleep(delay)
+                    
                 except FloodWait as e:
                     await asyncio.sleep(e.value + 2)
                     sts.add('failed')
@@ -174,14 +175,10 @@ async def run_forwarding_task(bot, user_id, frwd_id, bot_id, sts, message_obj):
                     logger.error(f"Failed to process message {message.id}: {e}", exc_info=False)
                     sts.add('failed')
 
-                if not forward_tag: await asyncio.sleep(delay)
+            if temp.CANCEL.get(frwd_id): break
             
             # Save progress
             await db.save_task(frwd_id, {'fetched': sts.get('fetched'), 'mode': task_mode})
-
-        if forward_tag and forward_batch and not temp.CANCEL.get(frwd_id):
-            await client_instance.forward_messages(chat_id=i.TO, from_chat_id=i.FROM, message_ids=forward_batch, protect_content=protect)
-            sts.add('total_files', len(forward_batch))
 
         if not temp.CANCEL.get(frwd_id): final_status = "completed"
 
@@ -191,7 +188,7 @@ async def run_forwarding_task(bot, user_id, frwd_id, bot_id, sts, message_obj):
         await msg_edit(message_obj, f"An error occurred: `{e}`")
 
     finally:
-        await edit_progress(message_obj, sts, final_status)
+        await edit_progress(message_obj, sts, final_status, extra_info if 'extra_info' in locals() else None)
         await stop(client_instance, user_id, frwd_id)
 
 @Client.on_callback_query(filters.regex(r'^start_public'))
@@ -213,7 +210,6 @@ async def pub_(bot, cb):
     if not bot_id:
         return await m.edit("Bot selection lost from session. Please restart.")
     
-    # Preserve the mode if it was set in STS data
     current_mode = sts.data[frwd_id].get('mode', 'standard')
 
     task_details = {
@@ -246,6 +242,24 @@ async def resume_forwarding(bot, task_data):
 
     await run_forwarding_task(bot, user_id, frwd_id, bot_id, sts, m)
 
+@Client.on_callback_query(filters.regex(r'^restore_progress_'))
+async def restore_progress_cb(bot, query):
+    task_id = query.data.split("_")[2]
+    sts = STS(task_id)
+    if not sts.verify():
+        return await query.answer("Task completed or invalid.", show_alert=True)
+    
+    # Retrieve stored names if available, or just use IDs
+    task_info = temp.ACTIVE_TASKS.get(query.from_user.id, {}).get(task_id, {}).get("details", {})
+    extra_info = {
+        'from': task_info.get('from', 'Unknown'),
+        'to': task_info.get('to', 'Unknown'),
+        'mode': 'Restored View'
+    }
+    
+    await edit_progress(query.message, sts, sts.data[task_id].get('status', 'running'), extra_info)
+    await query.answer("Resumed view.")
+
 @Client.on_callback_query(filters.regex(r'^frwd_status_'))
 async def get_frwd_status(bot, query):
     task_id = query.data.split("_", 2)[2]
@@ -271,24 +285,45 @@ async def msg_edit(msg, text, button=None, wait=None):
         if wait: await asyncio.sleep(e.value); return await msg_edit(msg, text, button, wait)
     except Exception: return msg
 
-async def edit_progress(msg, sts, status):
+async def edit_progress(msg, sts, status, extra_info=None):
     i = sts.get(full=True); sts.set_status(status)
     button = None
+    
+    if extra_info is None:
+        extra_info = {'from': '...', 'to': '...', 'mode': 'Running'}
+
     if status not in ["cancelled", "completed", "error"]:
         diff = time.time() - i.start
         if diff == 0: diff = 1
-        eta = sts.get_readable_time(int((i.total - i.fetched) / (i.fetched / diff) if (i.fetched / diff) > 0 else 0))
+        speed = i.fetched / diff
+        eta = sts.get_readable_time(int((i.total - i.fetched) / speed if speed > 0 else 0))
         percentage = "{:.2f}".format(i.fetched * 100 / i.total if i.total > 0 else 0.00)
+        
+        # New Modern UI
         progress_bar = "▰{0}▱{1}".format('▰' * math.floor(float(percentage) / 10), '▱' * (10 - math.floor(float(percentage) / 10)))
-        text = Translation.TEXT.format(
-            status=status, fetched=i.fetched, total=i.total, forwarded=i.total_files,
-            failed=i.failed, skipped=i.deleted + i.filtered, duplicates=i.duplicate,
-            percentage=percentage, eta=eta, progress_bar=progress_bar)
+        
+        text = (f"<b>🚀 Forwarding Task</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"<b>🎭 Info:</b> {extra_info.get('mode', 'N/A')}\n"
+                f"<b>📂 From:</b> {extra_info.get('from', 'N/A')}\n"
+                f"<b>📂 To:</b> {extra_info.get('to', 'N/A')}\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"<b>📊 Progress:</b> {percentage}%\n"
+                f"{progress_bar}\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"<b>✅ Success:</b> {i.total_files}\n"
+                f"<b>🚫 Failed:</b> {i.failed}\n"
+                f"<b>⏭ Skipped:</b> {i.deleted + i.filtered + i.duplicate}\n"
+                f"<b>⏳ ETA:</b> {eta}\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"<b>Status:</b> {status.title()}")
+
         button = InlineKeyboardMarkup([[InlineKeyboardButton(f"📊 Status: {percentage}%", callback_data=f'frwd_status_{i.id}')], [InlineKeyboardButton('❌ Cancel ❌', f'cancel_task_{i.id}')]])
     else:
         end_time = time.time(); time_taken = sts.get_readable_time(int(end_time - i.start))
         total_skipped = i.deleted + i.duplicate + i.filtered
-        title = "✅ <b>Forwarding Complete</b>" if status == "completed" else "❌ <b>Task Cancelled or Errored</b>"
+        
+        title = "✅ <b>Forwarding Complete</b>" if status == "completed" else f"❌ <b>Task {status.title()}</b>"
         line = "━━━━━━━━━━━━━━━━━━━━"
         text = (f"{title}\n{line}\n"
                 f"<b>Time Taken:</b> <code>{time_taken}</code>\n\n"

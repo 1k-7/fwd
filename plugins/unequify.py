@@ -1,4 +1,3 @@
-# mistaldrin/fwd/fwd-dawn-improve-v2/plugins/unequify.py
 import os
 import asyncio
 import io

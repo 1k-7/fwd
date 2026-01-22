@@ -1,4 +1,3 @@
-# mistaldrin/fwd/fwd-dawn-improve-v2/plugins/settings.py
 import asyncio
 import random
 import logging
@@ -107,7 +106,7 @@ async def settings_query(bot, query):
         elif type=="adduserbot":
            await query.message.delete()
            temp.USER_STATES[user_id] = {"state": "awaiting_user_session"}
-           await bot.send_message(user_id, "Send the Pyrogram (v2) session string.\n\nGet one from @mdsessiongenbot.\n\n/cancel - to cancel.")
+           await bot.send_message(user_id, "Send the Pyrogram (v2) session string.\n\n/cancel - to cancel.")
 
         elif type.startswith("editbot"):
            bot_id = int(data)

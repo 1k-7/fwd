@@ -1,4 +1,3 @@
-# mistaldrin/fwd/fwd-dawn-improve-v2/translation.py
 import os
 from config import Config
 

@@ -1,14 +1,4 @@
-
-
-FINAL ITERATION OF DAWN
-
-WORKING /FORWARD & /UNEQUIFY
-
-MOST CMDS WORK...
-
-BACKUP COPY BRANCH...
-
-
+The perfect past Forward Bot (in the future - hopefully)
 
 Has message type selection for unequify. can take parameters for /unequify or choose via chat list.
 

@@ -1,10 +1,3 @@
-# MrSyD
-# Telegram Channel @Bot_Cracker
-# Developer @syd_xyz
-
-
-
-
 import asyncio 
 import time, datetime 
 from database import db 
@@ -62,12 +55,3 @@ async def broadcast_messages(user_id, message, log):
         return False, "Blocked"
     except Exception as e:
         return False, "Error"
-
-    
-
-
-
-
-# MrSyD
-# Telegram Channel @Bot_Cracker
-# Developer @syd_xyz

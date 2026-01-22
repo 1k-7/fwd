@@ -224,11 +224,12 @@ async def cancel_task_confirmation_cb(bot, query):
         await query.answer("This task is no longer active.", show_alert=True)
         return await active_tasks_cb(bot, query)
 
+    # Changed the "No" button to restore the progress view instead of going to task list
     await query.message.edit_text(
         f"<b>Are you sure you want to cancel this task?</b>\n\nTask ID: <code>{task_id[:8]}...</code>",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("✓ Yes, cancel it", callback_data=f"confirm_cancel_{task_id}")],
-            [InlineKeyboardButton("« No, go back", callback_data="active_tasks_cmd")]
+            [InlineKeyboardButton("« No, go back", callback_data=f"restore_progress_{task_id}")]
         ])
     )
 

@@ -1,5 +1,3 @@
-# mistaldrin/fwd/fwd-DawnUltra/plugins/public.py
-
 import re
 import asyncio
 import logging
