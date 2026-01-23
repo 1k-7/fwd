@@ -137,7 +137,7 @@ async def update_configs(user_id, key, value):
     current = await database.db.get_configs(user_id)
     if not current: current = {}
     
-    # --- CRITICAL FIX: Expanded allow-list to include ALL settings ---
+    # Expanded allow-list to include ALL settings
     allowed_keys = [
         'caption', 'duplicate', 'db_uri', 'forward_tag', 'protect', 
         'file_size', 'size_limit', 'extension', 'keywords', 'button', 

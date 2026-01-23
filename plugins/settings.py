@@ -413,7 +413,8 @@ async def settings_input_handler(bot: Client, message: Message):
         if prompt_id:
              try: await bot.delete_messages(user_id, prompt_id)
              except: pass
-        await CLIENT.add_bot(bot, message) # FIX: Removed () from CLIENT
+        # FIXED: Removed parens so it calls the method on the instance `CLIENT`
+        await CLIENT.add_bot(bot, message)
         temp.USER_STATES.pop(user_id, None)
     
     elif current_state == "awaiting_user_session":
@@ -422,7 +423,8 @@ async def settings_input_handler(bot: Client, message: Message):
         if prompt_id:
              try: await bot.delete_messages(user_id, prompt_id)
              except: pass
-        await CLIENT.add_session(bot, message) # FIX: Removed () from CLIENT
+        # FIXED: Removed parens so it calls the method on the instance `CLIENT`
+        await CLIENT.add_session(bot, message)
         temp.USER_STATES.pop(user_id, None)
 
     message.stop_propagation()
