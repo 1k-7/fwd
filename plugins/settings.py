@@ -39,10 +39,7 @@ SETTING_META = {
 }
 
 async def generate_setting_page(user_id, setting_key):
-    """
-    Generates the Text and Markup for a specific setting page based on DB value.
-    Returns: (text, reply_markup, thumbnail_id_if_any)
-    """
+    """Generates the Text and Markup for a specific setting page."""
     configs = await get_configs(user_id)
     
     if setting_key == "thumbnail":
@@ -78,8 +75,6 @@ async def generate_setting_page(user_id, setting_key):
         
         buttons = []
         buttons.append([InlineKeyboardButton("Set Limit (MB)", callback_data="settings#set#file_size")])
-        
-        # Toggle Button
         toggle_text = "Switch to 'Above'" if mode == 'below' else "Switch to 'Below'"
         buttons.append([InlineKeyboardButton(toggle_text, callback_data="settings#toggle_size_limit")])
         
@@ -87,7 +82,6 @@ async def generate_setting_page(user_id, setting_key):
             buttons.append([InlineKeyboardButton("Reset Limit", callback_data="settings#reset#file_size")])
         
         buttons.append([InlineKeyboardButton("Back", callback_data="settings#main")])
-        
         return text, InlineKeyboardMarkup(buttons), None
 
     elif setting_key in SETTING_META:
@@ -113,17 +107,15 @@ async def generate_setting_page(user_id, setting_key):
 async def settings(client, message):
     user_id = message.from_user.id
     if temp.lock.get(user_id):
-        return await message.reply("A task is already in progress. Please wait for it to complete before changing settings.")
+        return await message.reply("A task is already in progress.")
 
     ban_status = await db.get_ban_status(user_id)
     if ban_status["is_banned"]:
         return await message.reply_text(f"Access denied.\n\nReason: {ban_status['ban_reason']}")
 
-    text="<b>Settings</b>\n\nManage personal configurations."
-    
     await message.reply_photo(
         photo=random.choice(ZEN),
-        caption=text,
+        caption="<b>Settings</b>\n\nManage personal configurations.",
         reply_markup=main_buttons(),
         quote=True
     )
@@ -131,10 +123,10 @@ async def settings(client, message):
 @Client.on_callback_query(filters.regex(r'^settings'))
 async def settings_query(bot, query):
     user_id = query.from_user.id
-    temp.USER_STATES.pop(user_id, None) # Clear any pending states on nav
+    temp.USER_STATES.pop(user_id, None)
 
     if temp.lock.get(user_id):
-        return await query.answer("A task is already in progress. Please wait for it to complete before changing settings.", show_alert=True)
+        return await query.answer("Task in progress. Please wait.", show_alert=True)
     
     try: await query.answer() 
     except: pass
@@ -153,7 +145,6 @@ async def settings_query(bot, query):
             except:
                 await edit_or_reply(query.message, "<b>Settings</b>\n\nManage personal configurations.", reply_markup=main_buttons())
 
-        # --- DYNAMIC PAGES ---
         elif type in SETTING_META or type in ["file_size", "thumbnail"]:
             text, markup, _ = await generate_setting_page(user_id, type)
             await edit_or_reply(query.message, text, reply_markup=markup)
@@ -163,18 +154,13 @@ async def settings_query(bot, query):
             curr = configs.get('size_limit', 'below')
             new_mode = 'above' if curr == 'below' else 'below'
             await update_configs(user_id, 'size_limit', new_mode)
-            # Refresh Page
             text, markup, _ = await generate_setting_page(user_id, "file_size")
             await edit_or_reply(query.message, text, reply_markup=markup)
 
         elif type == "view":
-            key = data
             configs = await get_configs(user_id)
-            val = configs.get(key)
-            if not val:
-                await query.answer("Empty", show_alert=True)
-            else:
-                await query.answer(f"Value:\n{str(val)[:150]}", show_alert=True)
+            val = configs.get(data)
+            await query.answer(f"Value:\n{str(val)[:150]}" if val else "Empty", show_alert=True)
 
         elif type == "set":
             key = data
@@ -186,31 +172,18 @@ async def settings_query(bot, query):
                 text = f"<b>{meta['title']}</b>\n\n{meta['desc']}"
                 back_cb = f"settings#{key}"
             
-            buttons = [[InlineKeyboardButton("Cancel", callback_data=back_cb)]]
-            
-            # WZML-X Flow: Edit the message to the prompt
-            prompt = await edit_or_reply(query.message, text, reply_markup=InlineKeyboardMarkup(buttons))
-            
-            temp.USER_STATES[user_id] = {
-                "state": f"awaiting_setting_{key}",
-                "prompt_message_id": prompt.id
-            }
+            prompt = await edit_or_reply(query.message, text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data=back_cb)]]))
+            temp.USER_STATES[user_id] = {"state": f"awaiting_setting_{key}", "prompt_message_id": prompt.id}
 
         elif type == "reset":
-            key = data
-            await update_configs(user_id, key, None)
+            await update_configs(user_id, data, None)
             await query.answer("Reset!", show_alert=True)
-            # Refresh Page
-            text, markup, _ = await generate_setting_page(user_id, key)
+            text, markup, _ = await generate_setting_page(user_id, data)
             await edit_or_reply(query.message, text, reply_markup=markup)
 
         elif type == "changethumb":
-            buttons = [[InlineKeyboardButton("Cancel", callback_data="settings#thumbnail")]]
-            prompt = await edit_or_reply(query.message, "<b>Send a Photo</b> to set as your custom thumbnail.", reply_markup=InlineKeyboardMarkup(buttons))
-            temp.USER_STATES[user_id] = {
-                "state": "awaiting_setting_thumbnail",
-                "prompt_message_id": prompt.id
-            }
+            prompt = await edit_or_reply(query.message, "<b>Send a Photo</b> to set as your custom thumbnail.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data="settings#thumbnail")]]))
+            temp.USER_STATES[user_id] = {"state": "awaiting_setting_thumbnail", "prompt_message_id": prompt.id}
 
         elif type == "delthumb":
             await update_configs(user_id, 'thumbnail', None)
@@ -222,132 +195,96 @@ async def settings_query(bot, query):
             configs = await get_configs(user_id)
             thumb = configs.get('thumbnail')
             if not thumb: return await query.answer("No thumbnail set", show_alert=True)
-            
-            buttons = [[InlineKeyboardButton("Back", callback_data="settings#thumbnail")]]
             try:
-                await query.message.edit_media(
-                    media=InputMediaPhoto(thumb, caption="<b>Current Custom Thumbnail</b>"),
-                    reply_markup=InlineKeyboardMarkup(buttons)
-                )
+                await query.message.edit_media(media=InputMediaPhoto(thumb, caption="<b>Current Custom Thumbnail</b>"), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="settings#thumbnail")]]))
             except:
-                await query.message.reply_photo(thumb, caption="<b>Current Custom Thumbnail</b>", reply_markup=InlineKeyboardMarkup(buttons))
+                await query.message.reply_photo(thumb, caption="<b>Current Custom Thumbnail</b>", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="settings#thumbnail")]]))
 
-        # --- FILTERS ---
         elif type == "filters":
-            text = "<b>Message Filters</b>\n\nToggle which message types to forward."
-            await edit_or_reply(query.message, text, reply_markup=await get_filters_markup(user_id))
+            await edit_or_reply(query.message, "<b>Message Filters</b>\n\nToggle which message types to forward.", reply_markup=await get_filters_markup(user_id))
 
         elif type == "toggle_filter":
-            filter_key = data
             current_configs = await get_configs(user_id)
             current_filters = current_configs.get('filters', {})
-            current_filters[filter_key] = not current_filters.get(filter_key, True)
+            current_filters[data] = not current_filters.get(data, True)
             await update_configs(user_id, 'filters', current_filters)
             await query.message.edit_reply_markup(reply_markup=await get_filters_markup(user_id))
 
-        # --- BOTS & CHANNELS ---
         elif type == "bots":
-            bots = await db.get_bots(user_id)
-            bot_buttons = []
-            for _bot in bots:
-                if not _bot.get('id'): continue
-                bot_name = _bot.get('name') or _bot.get('username', f"ID: {_bot['id']}")
-                bot_id = _bot.get('id')
-                bot_buttons.append(InlineKeyboardButton(bot_name[:15], callback_data=f"settings#editbot#{bot_id}"))
-
-            # 2-Column Layout with Placeholder
-            buttons = [bot_buttons[i:i + 2] for i in range(0, len(bot_buttons), 2)]
-            if len(bot_buttons) % 2 != 0:
-                 # Add placeholder to the last row if it has only one element
-                 buttons[-1].append(InlineKeyboardButton("(｡•̀ᴗ-)", callback_data="settings#empty"))
-
-            buttons.append([
-                InlineKeyboardButton('+ Add Bot', callback_data="settings#addbot"),
-                InlineKeyboardButton('+ Add Userbot', callback_data="settings#adduserbot")
-            ])
-            buttons.append([InlineKeyboardButton('Back', callback_data="settings#main")])
-            
-            text = "<b>Bots & Userbots</b>\n\nManage connected bots and userbots."
-            await edit_or_reply(query.message, text, reply_markup=InlineKeyboardMarkup(buttons))
+            await show_bots_list(query.message, user_id)
 
         elif type == "empty":
             await query.answer("(｡•̀ᴗ-) Just a placeholder!", show_alert=True)
 
         elif type == "addbot":
-           text = "<b>ADD BOT</b>\n\n1. Open @BotFather\n2. Create a new bot.\n3. <b>Forward the message</b> with the token or send the token string here."
-           buttons = [[InlineKeyboardButton("Cancel", callback_data="settings#bots")]]
-           prompt = await edit_or_reply(query.message, text, reply_markup=InlineKeyboardMarkup(buttons))
-           temp.USER_STATES[user_id] = {
-               "state": "awaiting_bot_token",
-               "prompt_message_id": prompt.id
-           }
+           prompt = await edit_or_reply(query.message, "<b>ADD BOT</b>\n\n1. Open @BotFather\n2. Create a new bot.\n3. <b>Forward the message</b> with the token or send the token string here.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data="settings#bots")]]))
+           temp.USER_STATES[user_id] = {"state": "awaiting_bot_token", "prompt_message_id": prompt.id}
 
         elif type == "adduserbot":
-           text = "<b>ADD USERBOT</b>\n\nSend the <b>Pyrogram (v2)</b> session string.\n\n<i>⚠️ Use a trusted string generator.</i>"
-           buttons = [[InlineKeyboardButton("Cancel", callback_data="settings#bots")]]
-           prompt = await edit_or_reply(query.message, text, reply_markup=InlineKeyboardMarkup(buttons))
-           temp.USER_STATES[user_id] = {
-               "state": "awaiting_user_session",
-               "prompt_message_id": prompt.id
-           }
+           prompt = await edit_or_reply(query.message, "<b>ADD USERBOT</b>\n\nSend the <b>Pyrogram (v2)</b> session string.\n\n<i>⚠️ Use a trusted string generator.</i>", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data="settings#bots")]]))
+           temp.USER_STATES[user_id] = {"state": "awaiting_user_session", "prompt_message_id": prompt.id}
 
         elif type.startswith("editbot"):
            bot_id = int(data)
            _bot = await db.get_bot(user_id, bot_id)
            if not _bot: return await edit_or_reply(query.message, "Bot not found.")
-           bot_name = _bot.get('name', 'N/A'); bot_uname = _bot.get('username'); is_bot = _bot.get('is_bot', True)
-           TEXT = Translation.BOT_DETAILS if is_bot else Translation.USER_DETAILS
-           uname_display = f"@{bot_uname}" if bot_uname else "Not Set"
-           buttons = [[InlineKeyboardButton('Remove', callback_data=f"settings#removebot#{bot_id}")],
-                      [InlineKeyboardButton('Back', callback_data="settings#bots")]]
-           await edit_or_reply(query.message, TEXT.format(bot_name, bot_id, uname_display), reply_markup=InlineKeyboardMarkup(buttons))
+           TEXT = Translation.BOT_DETAILS if _bot.get('is_bot', True) else Translation.USER_DETAILS
+           uname = f"@{_bot.get('username')}" if _bot.get('username') else "Not Set"
+           buttons = [[InlineKeyboardButton('Remove', callback_data=f"settings#removebot#{bot_id}")], [InlineKeyboardButton('Back', callback_data="settings#bots")]]
+           await edit_or_reply(query.message, TEXT.format(_bot.get('name', 'N/A'), bot_id, uname), reply_markup=InlineKeyboardMarkup(buttons))
 
         elif type.startswith("removebot"):
-           bot_id = int(data)
-           await db.remove_bot(user_id, bot_id)
-           query.data = "settings#bots"
-           await settings_query(bot, query)
+           await db.remove_bot(user_id, int(data))
+           await show_bots_list(query.message, user_id)
 
         elif type == "channels":
-            buttons = []
-            channels = await db.get_user_channels(user_id)
-            for channel in channels:
-                buttons.append([InlineKeyboardButton(f"● {channel['title']}", callback_data=f"settings#editchannel#{channel['chat_id']}")])
-            buttons.append([InlineKeyboardButton('+ Add Channel', callback_data="settings#addchannel")])
-            buttons.append([InlineKeyboardButton('Back', callback_data="settings#main")])
-            text = "<b>Target Channels</b>\n\nManage target chats for forwarding."
-            await edit_or_reply(query.message, text, reply_markup=InlineKeyboardMarkup(buttons))
+            await show_channels_list(query.message, user_id)
         
         elif type == "addchannel":
-           prompt_message = await edit_or_reply(query.message, "<b>Set Target Chat</b>\n\nForward a message from the target chat.\n\n/cancel - to cancel.")
-           temp.USER_STATES[user_id] = {
-               "state": "awaiting_channel_forward",
-               "prompt_message_id": prompt_message.id
-           }
+           prompt = await edit_or_reply(query.message, "<b>Set Target Chat</b>\n\nForward a message from the target chat.\n\n/cancel - to cancel.")
+           temp.USER_STATES[user_id] = {"state": "awaiting_channel_forward", "prompt_message_id": prompt.id}
         
         elif type.startswith("editchannel"):
-           chat_id = int(data)
-           chat = await db.get_channel_details(user_id, chat_id)
-           buttons = [[InlineKeyboardButton('Remove', callback_data=f"settings#removechannel#{chat_id}")],
-                      [InlineKeyboardButton('Back', callback_data="settings#channels")]]
-           text = f"<b>Channel Details</b>\n\n<b>Title:</b> <code>{chat['title']}</code>\n<b>ID:</b> <code>{chat['chat_id']}</code>\n<b>Username:</b> {chat['username']}"
-           await edit_or_reply(query.message, text, reply_markup=InlineKeyboardMarkup(buttons))
+           chat = await db.get_channel_details(user_id, int(data))
+           buttons = [[InlineKeyboardButton('Remove', callback_data=f"settings#removechannel#{data}")], [InlineKeyboardButton('Back', callback_data="settings#channels")]]
+           await edit_or_reply(query.message, f"<b>Channel Details</b>\n\n<b>Title:</b> <code>{chat['title']}</code>\n<b>ID:</b> <code>{chat['chat_id']}</code>\n<b>Username:</b> {chat['username']}", reply_markup=InlineKeyboardMarkup(buttons))
 
         elif type.startswith("removechannel"):
-           chat_id = int(data)
-           await db.remove_channel(user_id, chat_id)
-           query.data = "settings#channels"
-           await settings_query(bot, query)
+           await db.remove_channel(user_id, int(data))
+           await show_channels_list(query.message, user_id)
 
     except Exception as e:
         logger.error(f"Error in settings_query: {e}", exc_info=True)
+
+async def show_bots_list(message, user_id):
+    bots = await db.get_bots(user_id)
+    bot_buttons = []
+    for _bot in bots:
+        if not _bot.get('id'): continue
+        name = _bot.get('name') or _bot.get('username', f"ID: {_bot['id']}")
+        bot_buttons.append(InlineKeyboardButton(name[:15], callback_data=f"settings#editbot#{_bot['id']}"))
+    
+    buttons = [bot_buttons[i:i + 2] for i in range(0, len(bot_buttons), 2)]
+    if len(bot_buttons) % 2 != 0: buttons[-1].append(InlineKeyboardButton("(｡•̀ᴗ-)", callback_data="settings#empty"))
+    
+    buttons.append([InlineKeyboardButton('+ Add Bot', callback_data="settings#addbot"), InlineKeyboardButton('+ Add Userbot', callback_data="settings#adduserbot")])
+    buttons.append([InlineKeyboardButton('Back', callback_data="settings#main")])
+    await edit_or_reply(message, "<b>Bots & Userbots</b>\n\nManage connected bots and userbots.", reply_markup=InlineKeyboardMarkup(buttons))
+
+async def show_channels_list(message, user_id):
+    buttons = []
+    channels = await db.get_user_channels(user_id)
+    for channel in channels:
+        buttons.append([InlineKeyboardButton(f"● {channel['title']}", callback_data=f"settings#editchannel#{channel['chat_id']}")])
+    buttons.append([InlineKeyboardButton('+ Add Channel', callback_data="settings#addchannel")])
+    buttons.append([InlineKeyboardButton('Back', callback_data="settings#main")])
+    await edit_or_reply(message, "<b>Target Channels</b>\n\nManage target chats for forwarding.", reply_markup=InlineKeyboardMarkup(buttons))
 
 async def get_filters_markup(user_id):
     configs = await get_configs(user_id)
     filters = configs.get('filters', {})
     buttons = []
-    filter_keys = ['text', 'photo', 'video', 'document', 'audio', 'voice', 'sticker', 'animation', 'poll']
-    for key in filter_keys:
+    for key in ['text', 'photo', 'video', 'document', 'audio', 'voice', 'sticker', 'animation', 'poll']:
         status = "✓" if filters.get(key, True) else "✗"
         buttons.append(InlineKeyboardButton(f"{status} {key.title()}", callback_data=f"settings#toggle_filter#{key}"))
     markup = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
@@ -355,22 +292,137 @@ async def get_filters_markup(user_id):
     return InlineKeyboardMarkup(markup)
 
 def main_buttons():
-    buttons = [[
-        InlineKeyboardButton('Bots & Userbots', callback_data='settings#bots'),
-        InlineKeyboardButton('Channels', callback_data='settings#channels')
-    ], [
-        InlineKeyboardButton('Caption', callback_data='settings#caption'),
-        InlineKeyboardButton('Button', callback_data='settings#button')
-    ], [
-        InlineKeyboardButton('Message Filters', callback_data='settings#filters'),
-        InlineKeyboardButton('Custom Thumbnail', callback_data='settings#thumbnail')
-    ], [
-        InlineKeyboardButton('File Size Filter', callback_data='settings#file_size'),
-        InlineKeyboardButton('Duplicate Check DB', callback_data='settings#db_uri')
-    ], [
-        InlineKeyboardButton('Keyword Filter', callback_data='settings#keywords'),
-        InlineKeyboardButton('Extension Filter', callback_data='settings#extension')
-    ], [
-        InlineKeyboardButton('Back', callback_data='back')
-    ]]
-    return InlineKeyboardMarkup(buttons)
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton('Bots & Userbots', callback_data='settings#bots'), InlineKeyboardButton('Channels', callback_data='settings#channels')],
+        [InlineKeyboardButton('Caption', callback_data='settings#caption'), InlineKeyboardButton('Button', callback_data='settings#button')],
+        [InlineKeyboardButton('Message Filters', callback_data='settings#filters'), InlineKeyboardButton('Custom Thumbnail', callback_data='settings#thumbnail')],
+        [InlineKeyboardButton('File Size Filter', callback_data='settings#file_size'), InlineKeyboardButton('Duplicate Check DB', callback_data='settings#db_uri')],
+        [InlineKeyboardButton('Keyword Filter', callback_data='settings#keywords'), InlineKeyboardButton('Extension Filter', callback_data='settings#extension')],
+        [InlineKeyboardButton('Back', callback_data='back')]
+    ])
+
+# --- SETTINGS INPUT HANDLER ---
+@Client.on_message(filters.private & filters.incoming, group=-1)
+async def settings_input_handler(bot: Client, message: Message):
+    if message.edit_date: return
+
+    user_id = message.from_user.id
+    state_info = temp.USER_STATES.get(user_id)
+    if not state_info: return
+
+    current_state = state_info.get("state")
+    prompt_id = state_info.get("prompt_message_id")
+    
+    # Check if this handler is responsible
+    relevant_states = ["awaiting_bot_token", "awaiting_user_session", "awaiting_channel_forward"]
+    is_setting = current_state and current_state.startswith("awaiting_setting_")
+    
+    if not (is_setting or current_state in relevant_states):
+        return # Pass to public.py
+
+    # --- HANDLE CANCEL ---
+    if message.text and message.text.lower() == "/cancel":
+        if prompt_id:
+            try: await bot.delete_messages(user_id, prompt_id)
+            except: pass
+        temp.USER_STATES.pop(user_id, None)
+        try: await message.delete() 
+        except: pass
+        await message.reply(Translation.CANCEL)
+        message.stop_propagation()
+        return
+
+    # --- SETTINGS INPUT ---
+    if is_setting:
+        setting_key = current_state.split("awaiting_setting_")[1]
+        value = None
+        error_msg = None
+        
+        try: await message.delete()
+        except: pass
+        
+        if message.text and message.text.lower() == "/reset": 
+            value = None
+        elif setting_key == "file_size":
+            if not message.text: error_msg = "❌ Error: Please send a number."
+            else:
+                try: value = float(message.text) * 1024 * 1024
+                except ValueError: error_msg = "❌ Invalid number. Please enter a valid number (e.g., 10 or 2.5)."
+        elif setting_key == "button":
+             if not message.text: error_msg = "❌ Error: Text required."
+             elif not parse_buttons(message.text, markup=False): error_msg = "❌ Invalid button format.\n\nUse: `[Text][buttonurl:link]`"
+             else: value = message.text
+        elif setting_key == "db_uri":
+             if not message.text: error_msg = "❌ Error: Text required."
+             elif not (message.text.startswith("mongodb") or message.text.startswith("mongodb+srv")): error_msg = "❌ Invalid MongoDB URI. It must start with `mongodb`."
+             else: value = message.text
+        elif setting_key == "thumbnail":
+            if message.photo: value = message.photo.file_id
+            elif message.document and message.document.mime_type.startswith("image/"): value = message.document.file_id
+            else: error_msg = "❌ Invalid media. Send a Photo or an Image Document."
+        else: 
+            if not message.text: error_msg = "❌ Error: Text required."
+            else: value = message.text
+
+        if error_msg:
+             await bot.send_message(user_id, error_msg)
+             message.stop_propagation()
+             return
+
+        await update_configs(user_id, setting_key, value)
+        temp.USER_STATES.pop(user_id, None)
+        
+        # REFRESH MENU
+        text, markup, thumb_id = await generate_setting_page(user_id, setting_key)
+        
+        if prompt_id:
+            try:
+                if thumb_id: 
+                     await bot.edit_message_media(chat_id=user_id, message_id=prompt_id, 
+                         media=InputMediaPhoto(thumb_id, caption="✅ Saved!\n\n" + text), reply_markup=markup)
+                else:
+                     await bot.edit_message_text(chat_id=user_id, message_id=prompt_id, 
+                         text=f"✅ <b>Saved Successfully!</b>\n\n{text}", reply_markup=markup)
+            except Exception:
+                try: await bot.delete_messages(user_id, prompt_id)
+                except: pass
+                if thumb_id: await bot.send_photo(user_id, photo=thumb_id, caption="✅ Saved!\n\n" + text, reply_markup=markup)
+                else: await bot.send_message(user_id, f"✅ <b>Saved Successfully!</b>\n\n{text}", reply_markup=markup)
+    
+    elif current_state == "awaiting_channel_forward":
+        try: await message.delete()
+        except: pass
+        if prompt_id:
+            try: await bot.delete_messages(user_id, prompt_id)
+            except: pass
+
+        if not message.forward_date: 
+            await bot.send_message(user_id, "❌ Not a forwarded message.\nPlease forward a message from the target channel.")
+        else:
+            chat_id, title = message.forward_from_chat.id, message.forward_from_chat.title
+            username = f"@{message.forward_from_chat.username}" if message.forward_from_chat.username else "private"
+            if await db.in_channel(user_id, chat_id): await bot.send_message(user_id, "This channel has already been added.")
+            else: 
+                await db.add_channel(user_id, chat_id, title, username)
+                await bot.send_message(user_id, "Channel added. ✓")
+        temp.USER_STATES.pop(user_id, None)
+    
+    elif current_state == "awaiting_bot_token":
+        try: await message.delete()
+        except: pass
+        if prompt_id:
+             try: await bot.delete_messages(user_id, prompt_id)
+             except: pass
+        await CLIENT().add_bot(bot, message)
+        temp.USER_STATES.pop(user_id, None)
+    
+    elif current_state == "awaiting_user_session":
+        try: await message.delete()
+        except: pass
+        if prompt_id:
+             try: await bot.delete_messages(user_id, prompt_id)
+             except: pass
+        await CLIENT().add_session(bot, message)
+        temp.USER_STATES.pop(user_id, None)
+
+    message.stop_propagation()
