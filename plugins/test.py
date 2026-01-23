@@ -19,8 +19,6 @@ from typing import Union, Optional, AsyncGenerator
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-BOT_TOKEN_TEXT = "1. Go to @BotFather and send `/newbot`.\n\n2. Get the bot token from the reply.\n\n3. Forward that message here or just send the token.\n\n/cancel - to cancel."
-SESSION_STRING_TEXT = "<b>A friendly heads-up!</b> (｡•̀ᴗ-)✧\n\nUsing a user account for automation can be risky. It's a good idea to use an alternate account for this.\n\nThe developer is not responsible for what happens.\n\n<b>Send the Pyrogram (v2) session string.</b>\n\nGet one from @mdsessiongenbot.\n\n/cancel - to cancel."
 SESSION_STRING_SIZE = 351
 
 async def start_clone_bot(FwdBot, bot_data):
@@ -137,7 +135,12 @@ async def get_configs(user_id):
 async def update_configs(user_id, key, value):
     """Updates a specific configuration key for a user."""
     current = await db.get_configs(user_id)
-    if key in ['caption', 'duplicate', 'db_uri', 'forward_tag', 'protect', 'file_size', 'size_limit', 'extension', 'keywords', 'button', 'forward_delay', 'filters']:
+    # Ensure all necessary keys are allowed
+    allowed_keys = ['caption', 'duplicate', 'db_uri', 'forward_tag', 'protect', 
+                    'file_size', 'size_limit', 'extension', 'keywords', 
+                    'button', 'forward_delay', 'filters', 'thumbnail']
+    
+    if key in allowed_keys:
        current[key] = value
     elif key in current.get('filters', {}):
        current['filters'][key] = value

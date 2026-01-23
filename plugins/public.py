@@ -1,15 +1,13 @@
-# plugins/public.py
-
 import re
 import asyncio
 import logging
 import random
 from uuid import uuid4
-from .utils import STS, start_range_selection, update_range_message, edit_or_reply
+from .utils import STS, start_range_selection, update_range_message, edit_or_reply, parse_buttons
 from database import db
 from config import temp
 from translation import Translation
-from .test import CLIENT, update_configs
+from .test import CLIENT, update_configs, get_configs
 from .unequify import process_unequify_target
 from pyrogram import Client, filters, enums
 from pyrogram.errors import PeerIdInvalid
@@ -17,20 +15,42 @@ from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQ
 
 logger = logging.getLogger(__name__)
 
+# Metadata for restoration
+SETTING_META = {
+    "caption": {
+        "title": "CAPTION SETTING",
+        "desc": "Send your custom caption.\n\nUse placeholders like <code>{filename}</code>, <code>{size}</code>, and <code>{caption}</code>."
+    },
+    "button": {
+        "title": "BUTTON SETTINGS",
+        "desc": "Send your button in the format:\n<code>[Button Text][buttonurl:https://example.com]</code>"
+    },
+    "db_uri": {
+        "title": "DUPLICATE CHECK DB",
+        "desc": "Send your MongoDB connection string to be used for duplicate checking."
+    },
+    "extension": {
+        "title": "EXTENSION FILTER",
+        "desc": "Send a comma-separated list of file extensions to filter (e.g., <code>mkv,mp4,zip</code>)."
+    },
+    "keywords": {
+        "title": "KEYWORD FILTER",
+        "desc": "Send a comma-separated list of keywords to filter.\nUse a <code>-</code> prefix to exclude messages with a keyword (e.g., <code>cat,-dog</code>)."
+    }
+}
+
 def parse_message_input(message):
     """Parses a forwarded message or a message link."""
     if not message or (not message.text and not message.forward_date):
         return None, None, "Invalid input. A message link or forwarded message is required."
 
     if message.text:
-        # Check for openmessage link: tg://openmessage?user_id=...&message_id=...
         open_msg_match = re.search(r"tg://openmessage\?user_id=(\d+)(?:&message_id=(\d+))?", message.text)
         if open_msg_match:
             chat_id = int(open_msg_match.group(1))
             msg_id = int(open_msg_match.group(2)) if open_msg_match.group(2) else None
             return chat_id, msg_id, "id_scan"
 
-        # Check for custom chat:// scheme
         chat_scheme_match = re.search(r"chat://@?([\w\d_]+)", message.text)
         if chat_scheme_match:
              return chat_scheme_match.group(1), None, "id_scan"
@@ -64,21 +84,19 @@ async def run(bot, message):
         await prompt_target_channel(bot, message)
     else:
         buttons = [[InlineKeyboardButton(b.get('name') or f"ID: {b['id']}", callback_data=f"fwd_select_bot_{b['id']}")] for b in bots]
-        buttons.append([InlineKeyboardButton("« Cancel", callback_data="close_btn")])
+        buttons.append([InlineKeyboardButton("Cancel", callback_data="close_btn")])
         await message.reply("<b>Select a Bot or Userbot</b>", reply_markup=InlineKeyboardMarkup(buttons))
 
 @Client.on_callback_query(filters.regex(r'^fwd_select_bot_'))
 async def cb_select_bot(bot, query):
     bot_id = int(query.data.split('_')[-1])
     temp.FORWARD_BOT_ID[query.from_user.id] = bot_id
-    # Instead of delete, pass query.message to edit
     await prompt_target_channel(bot, query.message)
 
 async def prompt_target_channel(bot, message):
     user_id = message.chat.id
     channels = await db.get_user_channels(user_id)
     
-    # Build Channel Buttons
     chan_btns = [InlineKeyboardButton(c['title'], callback_data=f"fwd_target_{c['chat_id']}") for c in channels]
     chan_btns.append(InlineKeyboardButton("👤 PM Target", callback_data="fwd_target_pm"))
     
@@ -89,7 +107,7 @@ async def prompt_target_channel(bot, message):
     else:
         grid = [chan_btns[i:i+2] for i in range(0, len(chan_btns), 2)]
         
-    grid.append([InlineKeyboardButton("« Cancel", callback_data="close_btn")])
+    grid.append([InlineKeyboardButton("Cancel", callback_data="close_btn")])
     
     await edit_or_reply(message, Translation.TO_MSG, reply_markup=InlineKeyboardMarkup(grid))
 
@@ -247,7 +265,6 @@ async def stateful_message_handler(bot: Client, message: Message):
             await bot.send_message(user_id, f"❌ Error verifying source: `{e}`\nTry again.")
             return
 
-        # Instead of deleting status_msg, we pass it to be edited by start_range_selection
         temp.USER_STATES.pop(user_id, None)
         await start_range_selection(bot, status_msg, from_chat_id, from_title, to_chat_id, 1, end_id, mode=mode)
 
@@ -296,15 +313,23 @@ async def stateful_message_handler(bot: Client, message: Message):
         if message.text and message.text.lower() == "/reset": 
             value = None
         elif setting_key == "file_size":
-            try: value = float(message.text) * 1024 * 1024
+            try: 
+                value = float(message.text) * 1024 * 1024
             except ValueError: 
-                await bot.send_message(user_id, "❌ Invalid number. Try again.")
+                await bot.send_message(user_id, "❌ Invalid number. Please enter a valid number (e.g., 10 or 2.5).")
                 return
-        elif setting_key == "size_limit":
-            if message.text.lower() not in ["above", "below"]: 
-                await bot.send_message(user_id, "❌ Invalid option. Enter 'above' or 'below'.")
-                return
-            value = message.text.lower()
+        elif setting_key == "button":
+             # VALIDATE BUTTON
+             if not parse_buttons(message.text, markup=False):
+                 await bot.send_message(user_id, "❌ Invalid button format.\n\nUse: `[Text][url:link]`")
+                 return
+             value = message.text
+        elif setting_key == "db_uri":
+             # VALIDATE MONGODB
+             if not message.text.startswith("mongodb"):
+                 await bot.send_message(user_id, "❌ Invalid MongoDB URI. It must start with `mongodb`.")
+                 return
+             value = message.text
         elif setting_key == "thumbnail":
             if message.photo:
                 value = message.photo.file_id
@@ -317,8 +342,59 @@ async def stateful_message_handler(bot: Client, message: Message):
             value = message.text
 
         await update_configs(user_id, setting_key, value)
-        await bot.send_message(user_id, f"✅ **{setting_key.replace('_', ' ').title()}** has been updated.")
+        
+        # --- RESTORE SETTINGS MENU ---
         temp.USER_STATES.pop(user_id, None)
+        
+        if setting_key == "thumbnail":
+            buttons = [
+                [InlineKeyboardButton("View Current", callback_data="settings#viewthumb")],
+                [InlineKeyboardButton("Change", callback_data="settings#changethumb"),
+                 InlineKeyboardButton("Delete", callback_data="settings#delthumb")],
+                [InlineKeyboardButton("Back", callback_data="settings#main")]
+            ]
+            await bot.send_message(user_id, "<b>Custom Thumbnail</b>\n\nThumbnail saved successfully.", reply_markup=InlineKeyboardMarkup(buttons))
+        
+        elif setting_key == "file_size":
+             # Restore the Merged File Size Menu
+             configs = await get_configs(user_id) # Fetch fresh
+             size_limit_bytes = configs.get('file_size')
+             mode = configs.get('size_limit', 'below')
+             
+             size_display = "Not Set"
+             if size_limit_bytes:
+                mb_value = float(size_limit_bytes) / (1024 * 1024)
+                size_display = f"{mb_value:.2f} MB"
+             mode_display = "Below (Skip larger files)" if mode == 'below' else "Above (Skip smaller files)"
+             
+             text = (
+                "<b>FILE SIZE FILTER</b>\n\n"
+                f"<b>Current Limit:</b> <code>{size_display}</code>\n"
+                f"<b>Mode:</b> <code>{mode_display}</code>\n\n"
+                "Limit updated successfully."
+            )
+             buttons = []
+             buttons.append([InlineKeyboardButton("Set Limit (MB)", callback_data="settings#set#file_size")])
+             toggle_text = "Switch to 'Above'" if mode == 'below' else "Switch to 'Below'"
+             buttons.append([InlineKeyboardButton(toggle_text, callback_data="settings#toggle_size_limit")])
+             if size_limit_bytes:
+                buttons.append([InlineKeyboardButton("Reset Limit", callback_data="settings#reset#file_size")])
+             buttons.append([InlineKeyboardButton("Back", callback_data="settings#main")])
+             
+             await bot.send_message(user_id, text, reply_markup=InlineKeyboardMarkup(buttons))
+
+        elif setting_key in SETTING_META:
+            meta = SETTING_META[setting_key]
+            buttons = [
+                [InlineKeyboardButton("View Value", callback_data=f"settings#view#{setting_key}")],
+                [InlineKeyboardButton("Update Value", callback_data=f"settings#set#{setting_key}")],
+                [InlineKeyboardButton("Reset Value", callback_data=f"settings#reset#{setting_key}")],
+                [InlineKeyboardButton("Back", callback_data="settings#main")]
+            ]
+            await bot.send_message(user_id, f"<b>{meta['title']}</b>\n\nValue updated successfully.", reply_markup=InlineKeyboardMarkup(buttons))
+        else:
+            await bot.send_message(user_id, f"✅ **{setting_key.replace('_', ' ').title()}** has been updated.")
+
 
     elif current_state == "awaiting_unequify_manual_target":
         userbot_id = temp.UNEQUIFY_USERBOT_ID.get(user_id)
@@ -370,7 +446,6 @@ async def range_selection_callbacks(bot, query):
             "prompt_message_id": prompt.id
         }
     elif action == "confirm":
-        # Pass the message to be edited directly if possible
         final_callback = session.get('final_callback')
         if final_callback == 'fwd_final': await show_final_confirmation(bot, session_id, query.message)
         elif final_callback == 'uneq_final': from plugins.unequify import prompt_type_selection; await prompt_type_selection(bot, query, session_id)
