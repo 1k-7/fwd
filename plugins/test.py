@@ -135,8 +135,10 @@ async def get_configs(user_id):
 async def update_configs(user_id, key, value):
     """Updates a specific configuration key for a user."""
     current = await db.get_configs(user_id)
+    if not current: current = {}
     
-    # FIXED: Added missing keys (thumbnail, size_limit, etc) to allowed list
+    # --- CRITICAL FIX: Expanded allow-list to include ALL settings ---
+    # Without this, the database helper silently discards keys it doesn't recognize.
     allowed_keys = [
         'caption', 'duplicate', 'db_uri', 'forward_tag', 'protect', 
         'file_size', 'size_limit', 'extension', 'keywords', 'button', 
@@ -147,4 +149,5 @@ async def update_configs(user_id, key, value):
        current[key] = value
     elif key in current.get('filters', {}):
        current['filters'][key] = value
+       
     await db.update_configs(user_id, current)

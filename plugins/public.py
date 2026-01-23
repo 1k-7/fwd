@@ -1,15 +1,13 @@
 import re
 import asyncio
 import logging
-import random
-from uuid import uuid4
 from .utils import STS, start_range_selection, update_range_message, edit_or_reply, parse_buttons
 from database import db
 from config import temp
 from translation import Translation
 from .test import CLIENT, update_configs, get_configs
 from .unequify import process_unequify_target
-from .settings import construct_settings_menu, SETTING_META  # Import from settings for consistency
+from .settings import generate_setting_page, SETTING_META
 from pyrogram import Client, filters, enums
 from pyrogram.errors import PeerIdInvalid, MessageNotModified
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery, Message
@@ -118,7 +116,7 @@ async def stateful_message_handler(bot: Client, message: Message):
     current_state = state_info.get("state")
     prompt_id = state_info.get("prompt_message_id")
 
-    # --- HANDLE CANCEL ---
+    # --- HANDLE CANCEL COMMAND ---
     if message.text and message.text.lower() == "/cancel":
         if prompt_id:
             try: await bot.delete_messages(user_id, prompt_id)
@@ -133,11 +131,11 @@ async def stateful_message_handler(bot: Client, message: Message):
         setting_key = current_state.split("awaiting_setting_")[1]
         value = None
         
-        # 1. DELETE USER INPUT (Immediate cleanup)
+        # 1. DELETE USER INPUT
         try: await message.delete()
         except: pass
         
-        # 2. VALIDATION & PARSING
+        # 2. PARSE & VALIDATE
         if message.text and message.text.lower() == "/reset": 
             value = None
             
@@ -176,7 +174,7 @@ async def stateful_message_handler(bot: Client, message: Message):
                  return await bot.send_message(user_id, "❌ Error: Text required.")
             value = message.text
 
-        # 3. SAVE TO DB (Wait for completion)
+        # 3. SAVE TO DB
         await update_configs(user_id, setting_key, value)
         
         # 4. DELETE THE OLD PROMPT 
@@ -187,18 +185,18 @@ async def stateful_message_handler(bot: Client, message: Message):
         # 5. CLEAR STATE
         temp.USER_STATES.pop(user_id, None)
         
-        # 6. SEND REFRESHED MENU
-        text, markup, thumb_id = await construct_settings_menu(user_id, setting_key)
+        # 6. SEND REFRESHED MENU (WZML-X Style)
+        # Use the logic from settings.py to generate the specific menu for this key
+        text, markup, thumb_id = await generate_setting_page(user_id, setting_key)
         
         if thumb_id:
-            await bot.send_photo(user_id, photo=thumb_id, caption="✅ Thumbnail saved.\n\n" + text, reply_markup=markup)
+            await bot.send_photo(user_id, photo=thumb_id, caption="✅ Saved!\n\n" + text, reply_markup=markup)
         else:
-            # Prepend a success emoji/msg to the standard menu text so user knows it worked
             await bot.send_message(user_id, f"✅ <b>Saved Successfully!</b>\n\n{text}", reply_markup=markup)
         
         return
 
-    # --- PM TARGET / SOURCE HANDLERS (Same as before but with cleanup) ---
+    # --- PM TARGET / SOURCE HANDLERS ---
     try: await message.delete()
     except: pass
     
