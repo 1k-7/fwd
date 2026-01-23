@@ -1,21 +1,21 @@
+# plugins/public.py
+
 import re
 import asyncio
 import logging
-import random
-from uuid import uuid4
-from .utils import STS, start_range_selection, update_range_message, edit_or_reply, parse_buttons
+from .utils import start_range_selection, update_range_message, edit_or_reply, parse_buttons
 from database import db
 from config import temp
 from translation import Translation
 from .test import CLIENT, update_configs, get_configs
 from .unequify import process_unequify_target
 from pyrogram import Client, filters, enums
-from pyrogram.errors import PeerIdInvalid
-from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery, Message
+from pyrogram.errors import PeerIdInvalid, MessageNotModified
+from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message, InputMediaPhoto
 
 logger = logging.getLogger(__name__)
 
-# Metadata for restoration
+# Metadata to reconstruct menus
 SETTING_META = {
     "caption": {
         "title": "CAPTION SETTING",
@@ -141,23 +141,144 @@ async def stateful_message_handler(bot: Client, message: Message):
     current_state = state_info.get("state")
     prompt_id = state_info.get("prompt_message_id")
 
+    # --- HANDLE CANCEL COMMAND ---
     if message.text and message.text.lower() == "/cancel":
         if prompt_id:
             try: await bot.delete_messages(user_id, prompt_id)
             except Exception: pass
         temp.USER_STATES.pop(user_id, None)
+        try: await message.delete() 
+        except: pass
         return await message.reply(Translation.CANCEL)
 
-    if prompt_id:
-        try: await bot.delete_messages(user_id, prompt_id)
+    # --- SETTINGS INPUT HANDLER ---
+    if current_state and current_state.startswith("awaiting_setting_"):
+        setting_key = current_state.split("awaiting_setting_")[1]
+        value = None
+        
+        # 1. DELETE USER INPUT IMMEDIATELY (Clean UI)
+        try: await message.delete()
         except: pass
+        
+        # 2. VALIDATION & PARSING
+        if message.text and message.text.lower() == "/reset": 
+            value = None
+            
+        elif setting_key == "file_size":
+            if not message.text:
+                return await bot.send_message(user_id, "❌ Error: Please send a number.")
+            try: 
+                value = float(message.text) * 1024 * 1024
+            except ValueError: 
+                return await bot.send_message(user_id, "❌ Invalid number. Please enter a valid number (e.g., 10 or 2.5).")
+        
+        elif setting_key == "button":
+             if not message.text:
+                 return await bot.send_message(user_id, "❌ Error: Text required.")
+             if not parse_buttons(message.text, markup=False):
+                 return await bot.send_message(user_id, "❌ Invalid button format.\n\nUse: `[Text][buttonurl:link]`")
+             value = message.text
+             
+        elif setting_key == "db_uri":
+             if not message.text:
+                 return await bot.send_message(user_id, "❌ Error: Text required.")
+             if not (message.text.startswith("mongodb") or message.text.startswith("mongodb+srv")):
+                 return await bot.send_message(user_id, "❌ Invalid MongoDB URI. It must start with `mongodb`.")
+             value = message.text
+             
+        elif setting_key == "thumbnail":
+            if message.photo:
+                value = message.photo.file_id
+            elif message.document and message.document.mime_type.startswith("image/"):
+                value = message.document.file_id
+            else:
+                return await bot.send_message(user_id, "❌ Invalid media. Send a Photo or an Image Document.")
+        
+        else: 
+            # Caption, extensions, keywords
+            if not message.text:
+                 return await bot.send_message(user_id, "❌ Error: Text required.")
+            value = message.text
+
+        # 3. SAVE TO DB
+        await update_configs(user_id, setting_key, value)
+        
+        # 4. DELETE THE OLD PROMPT (To avoid clutter)
+        if prompt_id:
+            try: await bot.delete_messages(user_id, prompt_id)
+            except: pass
+        
+        # 5. CLEAR STATE & RESTORE MENU
+        temp.USER_STATES.pop(user_id, None)
+        
+        # --- RE-SEND THE CORRECT MENU ---
+        if setting_key == "thumbnail":
+            # Thumbnail Menu
+            buttons = [
+                [InlineKeyboardButton("View Current", callback_data="settings#viewthumb")],
+                [InlineKeyboardButton("Change", callback_data="settings#changethumb"),
+                 InlineKeyboardButton("Delete", callback_data="settings#delthumb")],
+                [InlineKeyboardButton("Back", callback_data="settings#main")]
+            ]
+            # Send as photo if we have the file_id, else text
+            try:
+                await bot.send_photo(user_id, photo=value, caption="<b>Custom Thumbnail</b>\n\nThumbnail saved successfully!", reply_markup=InlineKeyboardMarkup(buttons))
+            except:
+                await bot.send_message(user_id, "<b>Custom Thumbnail</b>\n\nThumbnail saved successfully!", reply_markup=InlineKeyboardMarkup(buttons))
+        
+        elif setting_key == "file_size":
+             # File Size Menu
+             configs = await get_configs(user_id)
+             size_limit_bytes = configs.get('file_size')
+             mode = configs.get('size_limit', 'below')
+             
+             size_display = "Not Set"
+             if size_limit_bytes:
+                mb_value = float(size_limit_bytes) / (1024 * 1024)
+                size_display = f"{mb_value:.2f} MB"
+             mode_display = "Below (Skip larger files)" if mode == 'below' else "Above (Skip smaller files)"
+             
+             text = (
+                "<b>FILE SIZE FILTER</b>\n\n"
+                f"<b>Current Limit:</b> <code>{size_display}</code>\n"
+                f"<b>Mode:</b> <code>{mode_display}</code>\n\n"
+                "✅ Limit updated successfully."
+            )
+             buttons = [
+                 [InlineKeyboardButton("Set Limit (MB)", callback_data="settings#set#file_size")],
+                 [InlineKeyboardButton(f"Switch to '{'Above' if mode == 'below' else 'Below'}'", callback_data="settings#toggle_size_limit")],
+                 [InlineKeyboardButton("Reset Limit", callback_data="settings#reset#file_size")],
+                 [InlineKeyboardButton("Back", callback_data="settings#main")]
+             ]
+             await bot.send_message(user_id, text, reply_markup=InlineKeyboardMarkup(buttons))
+
+        elif setting_key in SETTING_META:
+            # Generic Menus (Caption, Button, etc.)
+            meta = SETTING_META[setting_key]
+            buttons = [
+                [InlineKeyboardButton("View Value", callback_data=f"settings#view#{setting_key}")],
+                [InlineKeyboardButton("Update Value", callback_data=f"settings#set#{setting_key}")],
+                [InlineKeyboardButton("Reset Value", callback_data=f"settings#reset#{setting_key}")],
+                [InlineKeyboardButton("Back", callback_data="settings#main")]
+            ]
+            await bot.send_message(user_id, f"<b>{meta['title']}</b>\n\n✅ Value saved successfully.", reply_markup=InlineKeyboardMarkup(buttons))
+        else:
+            await bot.send_message(user_id, f"✅ **{setting_key.replace('_', ' ').title()}** has been updated.")
+        
+        return
+
+    # --- PM TARGET / SOURCE HANDLERS (Existing logic preserved) ---
+    # (Delete user msg for cleanliness)
     try: await message.delete()
     except: pass
     
+    if prompt_id:
+        try: await bot.delete_messages(user_id, prompt_id)
+        except: pass
+
     if current_state == "awaiting_pm_target":
         target_input = message.text
         resolved_chat_id = None
-        target_name = "PM Target"
 
         try:
             bot_id = temp.FORWARD_BOT_ID.get(user_id)
@@ -179,7 +300,6 @@ async def stateful_message_handler(bot: Client, message: Message):
                         return 
 
                 resolved_chat_id = chat.id
-                target_name = chat.title or chat.first_name
 
             prompt_message = await bot.send_message(user_id, Translation.FROM_MSG)
             temp.USER_STATES[user_id] = {
@@ -305,96 +425,6 @@ async def stateful_message_handler(bot: Client, message: Message):
     elif current_state == "awaiting_user_session":
         await CLIENT().add_session(bot, message)
         temp.USER_STATES.pop(user_id, None)
-
-    elif current_state and current_state.startswith("awaiting_setting_"):
-        setting_key = current_state.split("awaiting_setting_")[1]
-        value = None
-        
-        if message.text and message.text.lower() == "/reset": 
-            value = None
-        elif setting_key == "file_size":
-            try: 
-                value = float(message.text) * 1024 * 1024
-            except ValueError: 
-                await bot.send_message(user_id, "❌ Invalid number. Please enter a valid number (e.g., 10 or 2.5).")
-                return
-        elif setting_key == "button":
-             # VALIDATE BUTTON
-             if not parse_buttons(message.text, markup=False):
-                 await bot.send_message(user_id, "❌ Invalid button format.\n\nUse: `[Text][url:link]`")
-                 return
-             value = message.text
-        elif setting_key == "db_uri":
-             # VALIDATE MONGODB
-             if not message.text.startswith("mongodb"):
-                 await bot.send_message(user_id, "❌ Invalid MongoDB URI. It must start with `mongodb`.")
-                 return
-             value = message.text
-        elif setting_key == "thumbnail":
-            if message.photo:
-                value = message.photo.file_id
-            elif message.document and message.document.mime_type.startswith("image/"):
-                value = message.document.file_id
-            else:
-                await bot.send_message(user_id, "❌ Invalid media. Send a Photo or an Image Document.")
-                return
-        else: 
-            value = message.text
-
-        await update_configs(user_id, setting_key, value)
-        
-        # --- RESTORE SETTINGS MENU ---
-        temp.USER_STATES.pop(user_id, None)
-        
-        if setting_key == "thumbnail":
-            buttons = [
-                [InlineKeyboardButton("View Current", callback_data="settings#viewthumb")],
-                [InlineKeyboardButton("Change", callback_data="settings#changethumb"),
-                 InlineKeyboardButton("Delete", callback_data="settings#delthumb")],
-                [InlineKeyboardButton("Back", callback_data="settings#main")]
-            ]
-            await bot.send_message(user_id, "<b>Custom Thumbnail</b>\n\nThumbnail saved successfully.", reply_markup=InlineKeyboardMarkup(buttons))
-        
-        elif setting_key == "file_size":
-             # Restore the Merged File Size Menu
-             configs = await get_configs(user_id) # Fetch fresh
-             size_limit_bytes = configs.get('file_size')
-             mode = configs.get('size_limit', 'below')
-             
-             size_display = "Not Set"
-             if size_limit_bytes:
-                mb_value = float(size_limit_bytes) / (1024 * 1024)
-                size_display = f"{mb_value:.2f} MB"
-             mode_display = "Below (Skip larger files)" if mode == 'below' else "Above (Skip smaller files)"
-             
-             text = (
-                "<b>FILE SIZE FILTER</b>\n\n"
-                f"<b>Current Limit:</b> <code>{size_display}</code>\n"
-                f"<b>Mode:</b> <code>{mode_display}</code>\n\n"
-                "Limit updated successfully."
-            )
-             buttons = []
-             buttons.append([InlineKeyboardButton("Set Limit (MB)", callback_data="settings#set#file_size")])
-             toggle_text = "Switch to 'Above'" if mode == 'below' else "Switch to 'Below'"
-             buttons.append([InlineKeyboardButton(toggle_text, callback_data="settings#toggle_size_limit")])
-             if size_limit_bytes:
-                buttons.append([InlineKeyboardButton("Reset Limit", callback_data="settings#reset#file_size")])
-             buttons.append([InlineKeyboardButton("Back", callback_data="settings#main")])
-             
-             await bot.send_message(user_id, text, reply_markup=InlineKeyboardMarkup(buttons))
-
-        elif setting_key in SETTING_META:
-            meta = SETTING_META[setting_key]
-            buttons = [
-                [InlineKeyboardButton("View Value", callback_data=f"settings#view#{setting_key}")],
-                [InlineKeyboardButton("Update Value", callback_data=f"settings#set#{setting_key}")],
-                [InlineKeyboardButton("Reset Value", callback_data=f"settings#reset#{setting_key}")],
-                [InlineKeyboardButton("Back", callback_data="settings#main")]
-            ]
-            await bot.send_message(user_id, f"<b>{meta['title']}</b>\n\nValue updated successfully.", reply_markup=InlineKeyboardMarkup(buttons))
-        else:
-            await bot.send_message(user_id, f"✅ **{setting_key.replace('_', ' ').title()}** has been updated.")
-
 
     elif current_state == "awaiting_unequify_manual_target":
         userbot_id = temp.UNEQUIFY_USERBOT_ID.get(user_id)
