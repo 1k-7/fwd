@@ -9,7 +9,6 @@ from uuid import uuid4
 from database import db
 from config import temp
 from translation import Translation
-# from .test import parse_buttons  <-- Removed to prevent circular import
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 from pyrogram.errors import MessageNotModified
 from PIL import Image
@@ -17,6 +16,34 @@ from PIL import Image
 STATUS = {}
 SYD = ["https://files.catbox.moe/3lwlbm.png"]
 logger = logging.getLogger(__name__)
+
+# Moved from test.py to avoid circular imports
+BTN_URL_REGEX = re.compile(r"(\[([^\[]+?)]\[buttonurl:/{0,2}(.+?)(:same)?])")
+
+def parse_buttons(text, markup=True):
+    """Parses button markdown into a Pyrogram InlineKeyboardMarkup."""
+    buttons = []
+    if not text:
+        return None
+    for match in BTN_URL_REGEX.finditer(text):
+        n_escapes = 0
+        to_check = match.start(1) - 1
+        while to_check > 0 and text[to_check] == "\\":
+            n_escapes += 1
+            to_check -= 1
+
+        if n_escapes % 2 == 0:
+            if bool(match.group(4)) and buttons:
+                buttons[-1].append(InlineKeyboardButton(
+                    text=match.group(2),
+                    url=match.group(3).replace(" ", "")))
+            else:
+                buttons.append([InlineKeyboardButton(
+                    text=match.group(2),
+                    url=match.group(3).replace(" ", ""))])
+    if markup and buttons:
+       buttons = InlineKeyboardMarkup(buttons)
+    return buttons if buttons else None
 
 def get_readable_time(seconds: int) -> str:
     if seconds == 0:
@@ -56,8 +83,6 @@ async def format_thumbnail(path):
             img = img.convert('RGB')
         
         # Resize/Crop logic
-        # Telegram Document thumbs are best at 320x320 max.
-        # We resize preserving aspect ratio so the longest side is 320.
         img.thumbnail((320, 320))
         
         new_path = path.rsplit('.', 1)[0] + "_processed.jpg"
@@ -106,7 +131,6 @@ class STS:
         return self
     
     def set_status(self, status):
-        """Sets the current task status (e.g., 'running', 'floodwait')."""
         if self.id in self.data:
             self.data[self.id]['status'] = status
     
@@ -132,14 +156,13 @@ class STS:
         configs = await db.get_configs(user_id)
         filters = await db.get_filters(user_id)
         
-        # Import inside function to avoid circular dependency
-        from .test import parse_buttons
+        # Use the locally defined parse_buttons
         button = parse_buttons(configs.get('button', ''))
         
         return bot, configs.get('caption'), configs.get('forward_tag', False), {
             'filters': filters,
             'forward_delay': configs.get('forward_delay', 0.5),
-            'thumbnail': configs.get('thumbnail') # Ensure thumbnail is retrieved
+            'thumbnail': configs.get('thumbnail')
         }, configs.get('protect'), button
 
 async def start_range_selection(bot, message: Message, from_chat_id, from_title, to_chat_id, start_id, end_id, final_callback_prefix="fwd_final", mode="standard"):

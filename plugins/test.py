@@ -20,40 +20,12 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 BOT_TOKEN_TEXT = "1. Go to @BotFather and send `/newbot`.\n\n2. Get the bot token from the reply.\n\n3. Forward that message here or just send the token.\n\n/cancel - to cancel."
-SESSION_STRING_TEXT = "<b>A friendly heads-up!</b> (｡•̀ᴗ-)✧\n\nUsing a user account for automation can be risky. It's a good idea to use an alternate account for this.\n\nThe developer is not responsible for what happens.\n\n<b>Send the Pyrogram (v2) session string.</b>\n\n/cancel - to cancel."
+SESSION_STRING_TEXT = "<b>A friendly heads-up!</b> (｡•̀ᴗ-)✧\n\nUsing a user account for automation can be risky. It's a good idea to use an alternate account for this.\n\nThe developer is not responsible for what happens.\n\n<b>Send the Pyrogram (v2) session string.</b>\n\nGet one from @mdsessiongenbot.\n\n/cancel - to cancel."
 SESSION_STRING_SIZE = 351
-BTN_URL_REGEX = re.compile(r"(\[([^\[]+?)]\[buttonurl:/{0,2}(.+?)(:same)?])")
-
-
-def parse_buttons(text, markup=True):
-    """Parses button markdown into a Pyrogram InlineKeyboardMarkup."""
-    buttons = []
-    if not text:
-        return None
-    for match in BTN_URL_REGEX.finditer(text):
-        n_escapes = 0
-        to_check = match.start(1) - 1
-        while to_check > 0 and text[to_check] == "\\":
-            n_escapes += 1
-            to_check -= 1
-
-        if n_escapes % 2 == 0:
-            if bool(match.group(4)) and buttons:
-                buttons[-1].append(InlineKeyboardButton(
-                    text=match.group(2),
-                    url=match.group(3).replace(" ", "")))
-            else:
-                buttons.append([InlineKeyboardButton(
-                    text=match.group(2),
-                    url=match.group(3).replace(" ", ""))])
-    if markup and buttons:
-       buttons = InlineKeyboardMarkup(buttons)
-    return buttons if buttons else None
 
 async def start_clone_bot(FwdBot, bot_data):
    """
-   Starts the client. The complex iterator has been removed in favor of Pyrogram's
-   native get_chat_history, which is handled directly in regix.py for simplicity and reliability.
+   Starts the client. 
    """
    await FwdBot.start()
    return FwdBot
