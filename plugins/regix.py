@@ -42,14 +42,15 @@ async def run_forwarding_task(bot, user_id, frwd_id, bot_id, sts, message_obj):
         thumb_id = data_params.get('thumbnail')
         if thumb_id:
             try:
-                # 1. Download raw thumb
-                raw_thumb = await bot.download_media(thumb_id, file_name=f"raw_thumb_{frwd_id}")
+                # 1. Download raw thumb (ensure .jpg extension)
+                raw_thumb = await bot.download_media(thumb_id, file_name=f"raw_thumb_{frwd_id}.jpg")
                 
                 # 2. Format it (Resize, Crop, JPEG, <200KB)
                 if raw_thumb:
                     thumb_path = await format_thumbnail(raw_thumb)
+                    # Clean up raw file if different
                     if thumb_path != raw_thumb and os.path.exists(raw_thumb):
-                        os.remove(raw_thumb) # Clean raw file
+                        os.remove(raw_thumb)
             except Exception as e:
                 logger.error(f"Failed to prepare thumbnail: {e}")
                 # Continue without thumb if fail
@@ -174,7 +175,7 @@ async def run_forwarding_task(bot, user_id, frwd_id, bot_id, sts, message_obj):
                     capt = custom_caption(message, caption)
                     
                     # LOGIC:
-                    # 1. If Thumb exists: MUST use send_<media>(file_id) to apply thumb. (Both Bot and Userbot)
+                    # 1. If Thumb exists: MUST use send_<media>(file_id) to apply thumb.
                     # 2. If Bot (No Thumb): MUST use send_<media>(file_id) to bypass restrictions.
                     # 3. If Userbot (No Thumb): Use copy_message (Best for structure/speed).
                     
@@ -188,34 +189,53 @@ async def run_forwarding_task(bot, user_id, frwd_id, bot_id, sts, message_obj):
                             "reply_markup": button, 
                             "protect_content": protect
                         }
-                        if thumb_path: send_args['thumb'] = thumb_path
-
+                        
                         try:
+                            # Use open() for binary file reading if thumb exists
+                            thumb_file = open(thumb_path, 'rb') if thumb_path else None
+                            
                             if message.photo:
+                                # Photos do NOT support 'thumb'
                                 await client_instance.send_photo(photo=message.photo.file_id, **send_args)
+                            
                             elif message.video:
+                                if thumb_file: send_args['thumb'] = thumb_file
                                 await client_instance.send_video(video=message.video.file_id, **send_args)
+                            
                             elif message.document:
+                                if thumb_file: send_args['thumb'] = thumb_file
                                 await client_instance.send_document(document=message.document.file_id, **send_args)
+                            
                             elif message.audio:
+                                if thumb_file: send_args['thumb'] = thumb_file
                                 await client_instance.send_audio(audio=message.audio.file_id, **send_args)
+                            
                             elif message.voice:
+                                if thumb_file: send_args['thumb'] = thumb_file
                                 await client_instance.send_voice(voice=message.voice.file_id, **send_args)
+                            
                             elif message.animation:
+                                if thumb_file: send_args['thumb'] = thumb_file
                                 await client_instance.send_animation(animation=message.animation.file_id, **send_args)
+                            
                             elif message.sticker:
-                                # Stickers cannot have custom thumbs usually
                                 await client_instance.send_sticker(chat_id=i.TO, sticker=message.sticker.file_id) 
+                            
                             elif message.video_note:
+                                if thumb_file: send_args['thumb'] = thumb_file
                                 await client_instance.send_video_note(chat_id=i.TO, video_note=message.video_note.file_id)
+                            
                             else:
-                                # Fallback (polls, contacts, etc) -> Copy
+                                # Fallback -> Copy
                                 await message.copy(i.TO, caption=capt, reply_markup=button, protect_content=protect)
                             
+                            if thumb_file: thumb_file.close()
                             sts.add('total_files')
+
                         except Exception as e_send:
-                            # If send fails (e.g., file reference error for userbot), try copy as last resort
-                            # But ONLY if it wasn't a thumb error. 
+                            if thumb_file: thumb_file.close()
+                            
+                            # If send fails (e.g., thumb format issue), try copy as last resort
                             if thumb_path:
                                 logger.error(f"Send with thumb failed: {e_send}. Trying copy (thumb will be lost).")
                                 await message.copy(i.TO, caption=capt, reply_markup=button, protect_content=protect)
@@ -224,7 +244,6 @@ async def run_forwarding_task(bot, user_id, frwd_id, bot_id, sts, message_obj):
                                 raise e_send
 
                     elif message.text:
-                         # Text always send_message
                          await client_instance.send_message(i.TO, message.text.html, reply_markup=button, disable_web_page_preview=True, protect_content=protect)
                          sts.add('total_files')
 
@@ -262,7 +281,7 @@ async def run_forwarding_task(bot, user_id, frwd_id, bot_id, sts, message_obj):
         await edit_progress(message_obj, sts, final_status, extra_info if 'extra_info' in locals() else None)
         await stop(client_instance, user_id, frwd_id)
 
-# ... (Rest of regix.py functions: pub_, resume_forwarding, etc. remain unchanged) ...
+# ... (Rest of regix.py functions remain unchanged) ...
 @Client.on_callback_query(filters.regex(r'^start_public'))
 async def pub_(bot, cb):
     user_id = cb.from_user.id
