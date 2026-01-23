@@ -4,7 +4,7 @@ import asyncio
 import logging
 from uuid import uuid4
 from .utils import STS, start_range_selection, update_range_message, edit_or_reply
-from database import db
+import database
 from config import temp
 from translation import Translation
 from .test import CLIENT, update_configs, get_configs
@@ -51,7 +51,7 @@ async def run(bot, message):
         return await message.reply("A task is already in progress. Please wait for it to complete before starting a new one.")
     
     temp.USER_STATES.pop(user_id, None)
-    bots = await db.get_bots(user_id)
+    bots = await database.db.get_bots(user_id)
     if not bots:
         return await message.reply("Add a bot or userbot to proceed. ( >⁠.⁠< ) --> /settings")
 
@@ -71,7 +71,7 @@ async def cb_select_bot(bot, query):
 
 async def prompt_target_channel(bot, message):
     user_id = message.chat.id
-    channels = await db.get_user_channels(user_id)
+    channels = await database.db.get_user_channels(user_id)
     
     chan_btns = [InlineKeyboardButton(c['title'], callback_data=f"fwd_target_{c['chat_id']}") for c in channels]
     chan_btns.append(InlineKeyboardButton("👤 PM Target", callback_data="fwd_target_pm"))
@@ -151,7 +151,7 @@ async def stateful_message_handler(bot: Client, message: Message):
                  await bot.send_message(user_id, "Bot selection lost. Please restart.")
                  message.stop_propagation(); return
             
-            _bot_data = await db.get_bot(user_id, bot_id)
+            _bot_data = await database.db.get_bot(user_id, bot_id)
             async with CLIENT().client(_bot_data) as client_instance:
                 if message.forward_from:
                     chat = message.forward_from
@@ -192,7 +192,7 @@ async def stateful_message_handler(bot: Client, message: Message):
                  from_chat_id = int(from_chat_id)
             
             bot_id = temp.FORWARD_BOT_ID.get(user_id)
-            _bot_data = await db.get_bot(user_id, bot_id) if bot_id else None
+            _bot_data = await database.db.get_bot(user_id, bot_id) if bot_id else None
             
             if _bot_data and _bot_data.get('is_bot') and (isinstance(from_chat_id, str) or message.text.startswith("chat://")):
                  await bot.send_message(user_id, "❌ `chat://` source is only supported for **Userbots**.\nPlease provide a forwarded message or link.")
@@ -212,7 +212,7 @@ async def stateful_message_handler(bot: Client, message: Message):
                 await bot.send_message(user_id, "Bot selection lost. Please restart.")
                 message.stop_propagation(); return
             
-            _bot_data = await db.get_bot(user_id, bot_id)
+            _bot_data = await database.db.get_bot(user_id, bot_id)
             if not _bot_data:
                 await status_msg.delete()
                 await bot.send_message(user_id, "Selected bot/userbot not found in DB.")
@@ -337,7 +337,7 @@ async def show_final_confirmation(bot, session_id, message_to_edit=None):
     if not session: return
     user_id, bot_id = session['user_id'], temp.FORWARD_BOT_ID.get(session['user_id'])
     if not bot_id: return await bot.send_message(user_id, "Error: Bot selection lost.")
-    _bot, channels = await db.get_bot(user_id, bot_id), await db.get_user_channels(user_id)
+    _bot, channels = await database.db.get_bot(user_id, bot_id), await database.db.get_user_channels(user_id)
     
     to_title = "Unknown"
     for c in channels:

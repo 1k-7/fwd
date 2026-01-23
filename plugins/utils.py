@@ -6,7 +6,7 @@ import time as tm
 import logging
 import os
 from uuid import uuid4
-from database import db
+import database
 from config import temp
 from translation import Translation
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message, InputMediaPhoto
@@ -160,12 +160,12 @@ class STS:
                 if not bot_id:
                     raise ValueError("Bot ID not found in session for new task.")
 
-        bot = await db.get_bot(user_id, bot_id)
+        bot = await database.db.get_bot(user_id, bot_id)
         if not bot:
             raise ValueError(f"Bot with ID {bot_id} not found in database for user {user_id}.")
             
-        configs = await db.get_configs(user_id)
-        filters = await db.get_filters(user_id)
+        configs = await database.db.get_configs(user_id)
+        filters = await database.db.get_filters(user_id)
         
         button = parse_buttons(configs.get('button', ''))
         

@@ -16,7 +16,7 @@ from .test import CLIENT
 from .utils import start_range_selection, get_readable_time, edit_or_reply
 from translation import Translation
 from config import temp
-from database import db
+import database
 
 logger = logging.getLogger(__name__)
 
@@ -65,11 +65,11 @@ async def unequify_start(bot: Client, message: Message):
 
     temp.USER_STATES.pop(user_id, None)
     
-    ban_status = await db.get_ban_status(user_id)
+    ban_status = await database.db.get_ban_status(user_id)
     if ban_status["is_banned"]:
         return await message.reply_text(f"Access denied.\n\nReason: {ban_status['ban_reason']}")
 
-    userbots = [b for b in await db.get_bots(user_id) if not b.get('is_bot')]
+    userbots = [b for b in await database.db.get_bots(user_id) if not b.get('is_bot')]
     if not userbots:
         return await message.reply_text("Add a userbot to proceed.\n( >⁠.⁠< ) --> /settings")
 
@@ -107,7 +107,7 @@ async def process_unequify_target(bot: Client, message: Message, user_id: int, u
     status_msg = await edit_or_reply(message, "`Verifying target channel...`")
     
     try:
-        userbot_config = await db.get_bot(user_id, userbot_id)
+        userbot_config = await database.db.get_bot(user_id, userbot_id)
         if not userbot_config: 
             return await status_msg.edit("Selected userbot not found.")
 
@@ -181,7 +181,7 @@ async def unequify_callbacks(bot: Client, query: CallbackQuery):
         userbot_id = temp.UNEQUIFY_USERBOT_ID.get(user_id)
         if not userbot_id: return await edit_or_reply(query.message, "Error: Bot selection lost. Please start over.")
         
-        userbot_config = await db.get_bot(user_id, userbot_id)
+        userbot_config = await database.db.get_bot(user_id, userbot_id)
         if not userbot_config: return await edit_or_reply(query.message, "Userbot not found.")
         
         status_msg = await edit_or_reply(query.message, "`⏳ Fetching chats...`")
@@ -238,7 +238,7 @@ async def start_deduplication(bot: Client, callback_query: CallbackQuery, select
     userbot_id = temp.UNEQUIFY_USERBOT_ID.get(user_id)
     if not userbot_id: return await status_message.edit("Error: Bot selection lost.")
 
-    userbot_config = await db.get_bot(user_id, userbot_id)
+    userbot_config = await database.db.get_bot(user_id, userbot_id)
     if not userbot_config: return await status_message.edit("Error: Userbot not found.")
 
     target_channel, start_id, end_id = range_session['from_chat_id'], min(range_session['start_id'], range_session['end_id']), max(range_session['start_id'], range_session['end_id'])

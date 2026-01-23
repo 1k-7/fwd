@@ -5,7 +5,7 @@ import typing
 import asyncio 
 import logging 
 from uuid import uuid4
-from database import db 
+import database
 from config import Config, temp
 from pyrogram import Client, filters, types
 from pyrogram.raw.all import layer
@@ -61,14 +61,14 @@ class CLIENT:
      except Exception as e:
        return await msg.reply_text(f"<b>Bot Error:</b> `{e}`\n\nPlease check the token.")
      
-     if await db.is_bot_exist(user_id, _bot.id):
+     if await database.db.is_bot_exist(user_id, _bot.id):
          return await msg.reply_text("This bot has already been added.")
 
      details = {
        'id': _bot.id, 'is_bot': True, 'user_id': user_id,
        'name': _bot.first_name, 'token': bot_token, 'username': _bot.username 
      }
-     await db.add_bot(details)
+     await database.db.add_bot(details)
      await msg.reply_text("Bot token added. ✓")
 
     
@@ -86,27 +86,27 @@ class CLIENT:
      except Exception as e:
        return await msg.reply_text(f"<b>Userbot Error:</b> `{e}`\n\nPlease check the session string.")
      
-     if await db.is_bot_exist(user_id, user.id):
+     if await database.db.is_bot_exist(user_id, user.id):
          return await msg.reply_text("This userbot has already been added.")
 
      details = {
        'id': user.id, 'is_bot': False, 'user_id': user_id,
        'name': user.first_name, 'session': msg.text, 'username': user.username
      }
-     await db.add_bot(details)
+     await database.db.add_bot(details)
      await msg.reply_text("Session added. ✓")
 
 @Client.on_message(filters.private & filters.command('reset'))
 async def reset_user_settings(bot, m):
     """Resets a user's settings to default."""
-    default = await db.get_configs("01")
-    await db.update_configs(m.from_user.id, default)
+    default = await database.db.get_configs("01")
+    await database.db.update_configs(m.from_user.id, default)
     await m.reply("Settings have been reset. ✓")
 
 @Client.on_message(filters.command('resetall') & filters.user(Config.OWNER_ID))
 async def reset_all_users_settings(bot, message):
     """(Owner only) Resets specific settings for all users."""
-    users = await db.get_all_users()
+    users = await database.db.get_all_users()
     sts = await message.reply("Processing...")
     TEXT = "Total: {}\nSuccess: {}\nFailed: {}"
     total = success = failed = 0
@@ -119,7 +119,7 @@ async def reset_all_users_settings(bot, message):
         if total % 10 == 0:
            await sts.edit(TEXT.format(total, success, failed))
         try: 
-           await db.update_configs(user_id, default)
+           await database.db.update_configs(user_id, default)
            success += 1
         except Exception as e:
            ERRORS.append(e)
@@ -130,15 +130,14 @@ async def reset_all_users_settings(bot, message):
   
 async def get_configs(user_id):
     """Retrieves user configurations from the database."""
-    return await db.get_configs(user_id)
+    return await database.db.get_configs(user_id)
 
 async def update_configs(user_id, key, value):
     """Updates a specific configuration key for a user."""
-    current = await db.get_configs(user_id)
+    current = await database.db.get_configs(user_id)
     if not current: current = {}
     
     # --- CRITICAL FIX: Expanded allow-list to include ALL settings ---
-    # Without this, the database helper silently discards keys it doesn't recognize.
     allowed_keys = [
         'caption', 'duplicate', 'db_uri', 'forward_tag', 'protect', 
         'file_size', 'size_limit', 'extension', 'keywords', 'button', 
@@ -150,4 +149,4 @@ async def update_configs(user_id, key, value):
     elif key in current.get('filters', {}):
        current['filters'][key] = value
        
-    await db.update_configs(user_id, current)
+    await database.db.update_configs(user_id, current)

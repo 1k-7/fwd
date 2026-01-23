@@ -2,7 +2,7 @@
 import asyncio
 import random
 import logging
-from database import db
+import database
 from config import Config, temp
 from translation import Translation
 from pyrogram import Client, filters, enums
@@ -109,7 +109,7 @@ async def settings(client, message):
     if temp.lock.get(user_id):
         return await message.reply("A task is already in progress.")
 
-    ban_status = await db.get_ban_status(user_id)
+    ban_status = await database.db.get_ban_status(user_id)
     if ban_status["is_banned"]:
         return await message.reply_text(f"Access denied.\n\nReason: {ban_status['ban_reason']}")
 
@@ -226,7 +226,7 @@ async def settings_query(bot, query):
 
         elif type.startswith("editbot"):
            bot_id = int(data)
-           _bot = await db.get_bot(user_id, bot_id)
+           _bot = await database.db.get_bot(user_id, bot_id)
            if not _bot: return await edit_or_reply(query.message, "Bot not found.")
            TEXT = Translation.BOT_DETAILS if _bot.get('is_bot', True) else Translation.USER_DETAILS
            uname = f"@{_bot.get('username')}" if _bot.get('username') else "Not Set"
@@ -234,7 +234,7 @@ async def settings_query(bot, query):
            await edit_or_reply(query.message, TEXT.format(_bot.get('name', 'N/A'), bot_id, uname), reply_markup=InlineKeyboardMarkup(buttons))
 
         elif type.startswith("removebot"):
-           await db.remove_bot(user_id, int(data))
+           await database.db.remove_bot(user_id, int(data))
            await show_bots_list(query.message, user_id)
 
         elif type == "channels":
@@ -245,19 +245,19 @@ async def settings_query(bot, query):
            temp.USER_STATES[user_id] = {"state": "awaiting_channel_forward", "prompt_message_id": prompt.id}
         
         elif type.startswith("editchannel"):
-           chat = await db.get_channel_details(user_id, int(data))
+           chat = await database.db.get_channel_details(user_id, int(data))
            buttons = [[InlineKeyboardButton('Remove', callback_data=f"settings#removechannel#{data}")], [InlineKeyboardButton('Back', callback_data="settings#channels")]]
            await edit_or_reply(query.message, f"<b>Channel Details</b>\n\n<b>Title:</b> <code>{chat['title']}</code>\n<b>ID:</b> <code>{chat['chat_id']}</code>\n<b>Username:</b> {chat['username']}", reply_markup=InlineKeyboardMarkup(buttons))
 
         elif type.startswith("removechannel"):
-           await db.remove_channel(user_id, int(data))
+           await database.db.remove_channel(user_id, int(data))
            await show_channels_list(query.message, user_id)
 
     except Exception as e:
         logger.error(f"Error in settings_query: {e}", exc_info=True)
 
 async def show_bots_list(message, user_id):
-    bots = await db.get_bots(user_id)
+    bots = await database.db.get_bots(user_id)
     bot_buttons = []
     for _bot in bots:
         if not _bot.get('id'): continue
@@ -273,7 +273,7 @@ async def show_bots_list(message, user_id):
 
 async def show_channels_list(message, user_id):
     buttons = []
-    channels = await db.get_user_channels(user_id)
+    channels = await database.db.get_user_channels(user_id)
     for channel in channels:
         buttons.append([InlineKeyboardButton(f"● {channel['title']}", callback_data=f"settings#editchannel#{channel['chat_id']}")])
     buttons.append([InlineKeyboardButton('+ Add Channel', callback_data="settings#addchannel")])
@@ -401,9 +401,9 @@ async def settings_input_handler(bot: Client, message: Message):
         else:
             chat_id, title = message.forward_from_chat.id, message.forward_from_chat.title
             username = f"@{message.forward_from_chat.username}" if message.forward_from_chat.username else "private"
-            if await db.in_channel(user_id, chat_id): await bot.send_message(user_id, "This channel has already been added.")
+            if await database.db.in_channel(user_id, chat_id): await bot.send_message(user_id, "This channel has already been added.")
             else: 
-                await db.add_channel(user_id, chat_id, title, username)
+                await database.db.add_channel(user_id, chat_id, title, username)
                 await bot.send_message(user_id, "Channel added. ✓")
         temp.USER_STATES.pop(user_id, None)
     
@@ -413,7 +413,7 @@ async def settings_input_handler(bot: Client, message: Message):
         if prompt_id:
              try: await bot.delete_messages(user_id, prompt_id)
              except: pass
-        await CLIENT().add_bot(bot, message)
+        await CLIENT.add_bot(bot, message) # FIX: Removed () from CLIENT
         temp.USER_STATES.pop(user_id, None)
     
     elif current_state == "awaiting_user_session":
@@ -422,7 +422,7 @@ async def settings_input_handler(bot: Client, message: Message):
         if prompt_id:
              try: await bot.delete_messages(user_id, prompt_id)
              except: pass
-        await CLIENT().add_session(bot, message)
+        await CLIENT.add_session(bot, message) # FIX: Removed () from CLIENT
         temp.USER_STATES.pop(user_id, None)
 
     message.stop_propagation()
