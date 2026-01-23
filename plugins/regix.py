@@ -42,14 +42,8 @@ async def run_forwarding_task(bot, user_id, frwd_id, bot_id, sts, message_obj):
         thumb_id = data_params.get('thumbnail')
         if thumb_id:
             try:
-                # 1. Download raw thumb (ensure .jpg extension)
-                raw_thumb = await bot.download_media(thumb_id, file_name=f"raw_thumb_{frwd_id}.jpg")
-                
-                # 2. Format it (Resize, Crop, JPEG, <200KB)
-                if raw_thumb:
-                    thumb_path = await format_thumbnail(raw_thumb)
-                    if thumb_path != raw_thumb and os.path.exists(raw_thumb):
-                        os.remove(raw_thumb)
+                # Download raw thumb (Use AS IS, no formatting)
+                thumb_path = await bot.download_media(thumb_id)
             except Exception as e:
                 logger.error(f"Failed to prepare thumbnail: {e}")
         # -----------------------
@@ -386,21 +380,23 @@ async def edit_progress(msg, sts, status, extra_info=None):
         
         progress_bar = "▰{0}▱{1}".format('▰' * math.floor(float(percentage) / 10), '▱' * (10 - math.floor(float(percentage) / 10)))
         
-        # CLEAN & CLASSY RUNNING UI
-        text = (f"<b>FORWARDING...</b>\n"
-                f"━━━━━━━━━━━━━━━━━━\n"
-                f"<b>Mode:</b> {extra_info.get('mode', 'N/A')}\n"
-                f"<b>From:</b> {extra_info.get('from', 'N/A')}\n"
-                f"<b>To:</b> {extra_info.get('to', 'N/A')}\n\n"
-                f"<b>Progress:</b> {percentage}%\n"
+        text = (f"<b>🚀 Forwarding Task</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"<b>🎭 Info:</b> {extra_info.get('mode', 'N/A')}\n"
+                f"<b>📂 From:</b> {extra_info.get('from', 'N/A')}\n"
+                f"<b>📂 To:</b> {extra_info.get('to', 'N/A')}\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"<b>📊 Progress:</b> {percentage}%\n"
                 f"{progress_bar}\n"
-                f"━━━━━━━━━━━━━━━━━━\n"
-                f"<b>Success:</b> {i.total_files}\n"
-                f"<b>Failed:</b> {i.failed}\n"
-                f"<b>Skipped:</b> {i.deleted + i.filtered + i.duplicate}\n"
-                f"<b>ETA:</b> {eta}")
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"<b>✅ Success:</b> {i.total_files}\n"
+                f"<b>🚫 Failed:</b> {i.failed}\n"
+                f"<b>⏭ Skipped:</b> {i.deleted + i.filtered + i.duplicate}\n"
+                f"<b>⏳ ETA:</b> {eta}\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"<b>Status:</b> {status.title()}")
 
-        button = InlineKeyboardMarkup([[InlineKeyboardButton(f"Status: {percentage}%", callback_data=f'frwd_status_{i.id}')], [InlineKeyboardButton('Cancel Task', f'cancel_task_{i.id}')]])
+        button = InlineKeyboardMarkup([[InlineKeyboardButton(f"📊 Status: {percentage}%", callback_data=f'frwd_status_{i.id}')], [InlineKeyboardButton('❌ Cancel ❌', f'cancel_task_{i.id}')]])
     else:
         end_time = time.time(); time_taken = sts.get_readable_time(int(end_time - i.start))
         total_skipped = i.deleted + i.duplicate + i.filtered
@@ -408,21 +404,22 @@ async def edit_progress(msg, sts, status, extra_info=None):
         if diff == 0: diff = 1
         speed = i.fetched / diff
         
-        # MODERN COMPLETION CARD
-        icon = "Completed" if status == "completed" else "Cancelled"
+        icon = "✅" if status == "completed" else "❌"
+        title = f"{icon} <b>Task {status.title()}</b>"
         
-        text = (f"<b>TASK {icon.upper()}</b>\n"
+        # Modern Completion Card
+        text = (f"{title}\n"
                 f"━━━━━━━━━━━━━━━━━━\n"
-                f"⏱ <b>Duration:</b> {time_taken}\n"
+                f"⏱ <b>Time Taken:</b> {time_taken}\n"
                 f"🚀 <b>Speed:</b> {speed:.1f} msgs/s\n\n"
-                f"<b>STATISTICS</b>\n"
-                f"├ Processed: {i.fetched}\n"
-                f"├ Forwarded: {i.total_files}\n"
-                f"├ Failed: {i.failed}\n"
-                f"└ Skipped: {total_skipped}\n\n"
-                f"ID: <code>{i.id[:8]}...</code>")
+                f"📊 <b>Statistics</b>\n"
+                f"├ 📂 <b>Processed:</b> {i.fetched}\n"
+                f"├ ✅ <b>Forwarded:</b> {i.total_files}\n"
+                f"├ 🚫 <b>Failed:</b> {i.failed}\n"
+                f"└ ⏭ <b>Skipped:</b> {total_skipped}\n\n"
+                f"📝 <b>Task ID:</b> <code>{i.id[:8]}...</code>")
         
-        button = InlineKeyboardMarkup([[InlineKeyboardButton("Close", callback_data="close_btn")]])
+        button = InlineKeyboardMarkup([[InlineKeyboardButton("Done", callback_data="close_btn")]])
     await msg_edit(msg, text, button)
 
 async def stop(client, user_id, task_id):

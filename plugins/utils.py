@@ -103,7 +103,8 @@ async def format_thumbnail(path):
 async def edit_or_reply(message, text, reply_markup=None, parse_mode=None):
     """Attempts to edit the message; falls back to reply if not possible."""
     try:
-        await message.edit_text(text, reply_markup=reply_markup, parse_mode=parse_mode, disable_web_page_preview=True)
+        # FIX: Added return to pass the message object back to the caller
+        return await message.edit_text(text, reply_markup=reply_markup, parse_mode=parse_mode, disable_web_page_preview=True)
     except Exception:
         # If edit fails (e.g. message too old, different media type), try to delete and send new
         try:
