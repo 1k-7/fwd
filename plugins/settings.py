@@ -51,8 +51,8 @@ async def generate_setting_page(user_id, setting_key):
             text = "<b>Custom Thumbnail</b>\n\nYou have a custom thumbnail set."
             buttons = [
                 [InlineKeyboardButton("View Current", callback_data="settings#viewthumb")],
-                [InlineKeyboardButton("Change", callback_data="settings#changethumb"),
-                 InlineKeyboardButton("Delete", callback_data="settings#delthumb")],
+                [InlineKeyboardButton("Change Thumbnail", callback_data="settings#changethumb"),
+                 InlineKeyboardButton("Delete Thumbnail", callback_data="settings#delthumb")],
                 [InlineKeyboardButton("Back", callback_data="settings#main")]
             ]
             return text, InlineKeyboardMarkup(buttons), thumb_id
@@ -78,10 +78,14 @@ async def generate_setting_page(user_id, setting_key):
         
         buttons = []
         buttons.append([InlineKeyboardButton("Set Limit (MB)", callback_data="settings#set#file_size")])
+        
+        # Toggle Button
         toggle_text = "Switch to 'Above'" if mode == 'below' else "Switch to 'Below'"
         buttons.append([InlineKeyboardButton(toggle_text, callback_data="settings#toggle_size_limit")])
+        
         if size_limit:
             buttons.append([InlineKeyboardButton("Reset Limit", callback_data="settings#reset#file_size")])
+        
         buttons.append([InlineKeyboardButton("Back", callback_data="settings#main")])
         
         return text, InlineKeyboardMarkup(buttons), None
@@ -92,6 +96,7 @@ async def generate_setting_page(user_id, setting_key):
         
         text = f"<b>{meta['title']}</b>\n\n{meta['desc']}"
         buttons = []
+        
         if val:
             buttons.append([InlineKeyboardButton("View Value", callback_data=f"settings#view#{setting_key}")])
             buttons.append([InlineKeyboardButton("Update Value", callback_data=f"settings#set#{setting_key}")])
@@ -182,6 +187,8 @@ async def settings_query(bot, query):
                 back_cb = f"settings#{key}"
             
             buttons = [[InlineKeyboardButton("Cancel", callback_data=back_cb)]]
+            
+            # WZML-X Flow: Edit the message to the prompt
             prompt = await edit_or_reply(query.message, text, reply_markup=InlineKeyboardMarkup(buttons))
             
             temp.USER_STATES[user_id] = {
@@ -248,10 +255,12 @@ async def settings_query(bot, query):
                 bot_id = _bot.get('id')
                 bot_buttons.append(InlineKeyboardButton(bot_name[:15], callback_data=f"settings#editbot#{bot_id}"))
 
-            if len(bot_buttons) % 2 != 0:
-                bot_buttons.append(InlineKeyboardButton("(｡•̀ᴗ-)", callback_data="settings#empty"))
-
+            # 2-Column Layout with Placeholder
             buttons = [bot_buttons[i:i + 2] for i in range(0, len(bot_buttons), 2)]
+            if len(bot_buttons) % 2 != 0:
+                 # Add placeholder to the last row if it has only one element
+                 buttons[-1].append(InlineKeyboardButton("(｡•̀ᴗ-)", callback_data="settings#empty"))
+
             buttons.append([
                 InlineKeyboardButton('+ Add Bot', callback_data="settings#addbot"),
                 InlineKeyboardButton('+ Add Userbot', callback_data="settings#adduserbot")
@@ -265,7 +274,7 @@ async def settings_query(bot, query):
             await query.answer("(｡•̀ᴗ-) Just a placeholder!", show_alert=True)
 
         elif type == "addbot":
-           text = "<b>BOT ADDITION</b>\n\nForward the message from <b>@BotFather</b> containing the token, or just send the token string."
+           text = "<b>ADD BOT</b>\n\n1. Open @BotFather\n2. Create a new bot.\n3. <b>Forward the message</b> with the token or send the token string here."
            buttons = [[InlineKeyboardButton("Cancel", callback_data="settings#bots")]]
            prompt = await edit_or_reply(query.message, text, reply_markup=InlineKeyboardMarkup(buttons))
            temp.USER_STATES[user_id] = {
@@ -274,7 +283,7 @@ async def settings_query(bot, query):
            }
 
         elif type == "adduserbot":
-           text = "<b>USERBOT ADDITION</b>\n\nSend the <b>Pyrogram (v2)</b> session string."
+           text = "<b>ADD USERBOT</b>\n\nSend the <b>Pyrogram (v2)</b> session string.\n\n<i>⚠️ Use a trusted string generator.</i>"
            buttons = [[InlineKeyboardButton("Cancel", callback_data="settings#bots")]]
            prompt = await edit_or_reply(query.message, text, reply_markup=InlineKeyboardMarkup(buttons))
            temp.USER_STATES[user_id] = {

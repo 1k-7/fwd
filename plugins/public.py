@@ -1,3 +1,4 @@
+# plugins/public.py
 import re
 import asyncio
 import logging
@@ -126,12 +127,13 @@ async def stateful_message_handler(bot: Client, message: Message):
         except: pass
         return await message.reply(Translation.CANCEL)
 
-    # --- SETTINGS INPUT HANDLER ---
+    # --- SETTINGS INPUT HANDLER (WZML-X FLOW) ---
     if current_state and current_state.startswith("awaiting_setting_"):
         setting_key = current_state.split("awaiting_setting_")[1]
         value = None
+        error_msg = None
         
-        # 1. DELETE USER INPUT
+        # 1. DELETE USER INPUT IMMEDIATELY
         try: await message.delete()
         except: pass
         
@@ -140,26 +142,26 @@ async def stateful_message_handler(bot: Client, message: Message):
             value = None
             
         elif setting_key == "file_size":
-            if not message.text:
-                return await bot.send_message(user_id, "❌ Error: Please send a number.")
-            try: 
-                value = float(message.text) * 1024 * 1024
-            except ValueError: 
-                return await bot.send_message(user_id, "❌ Invalid number. Please enter a valid number (e.g., 10 or 2.5).")
+            if not message.text: error_msg = "❌ Error: Please send a number."
+            else:
+                try: 
+                    value = float(message.text) * 1024 * 1024
+                except ValueError: 
+                    error_msg = "❌ Invalid number. Please enter a valid number (e.g., 10 or 2.5)."
         
         elif setting_key == "button":
-             if not message.text:
-                 return await bot.send_message(user_id, "❌ Error: Text required.")
-             if not parse_buttons(message.text, markup=False):
-                 return await bot.send_message(user_id, "❌ Invalid button format.\n\nUse: `[Text][buttonurl:link]`")
-             value = message.text
+             if not message.text: error_msg = "❌ Error: Text required."
+             elif not parse_buttons(message.text, markup=False):
+                 error_msg = "❌ Invalid button format.\n\nUse: `[Text][buttonurl:link]`"
+             else:
+                 value = message.text
              
         elif setting_key == "db_uri":
-             if not message.text:
-                 return await bot.send_message(user_id, "❌ Error: Text required.")
-             if not (message.text.startswith("mongodb") or message.text.startswith("mongodb+srv")):
-                 return await bot.send_message(user_id, "❌ Invalid MongoDB URI. It must start with `mongodb`.")
-             value = message.text
+             if not message.text: error_msg = "❌ Error: Text required."
+             elif not (message.text.startswith("mongodb") or message.text.startswith("mongodb+srv")):
+                 error_msg = "❌ Invalid MongoDB URI. It must start with `mongodb`."
+             else:
+                 value = message.text
              
         elif setting_key == "thumbnail":
             if message.photo:
@@ -167,32 +169,51 @@ async def stateful_message_handler(bot: Client, message: Message):
             elif message.document and message.document.mime_type.startswith("image/"):
                 value = message.document.file_id
             else:
-                return await bot.send_message(user_id, "❌ Invalid media. Send a Photo or an Image Document.")
+                error_msg = "❌ Invalid media. Send a Photo or an Image Document."
         
         else: 
-            if not message.text:
-                 return await bot.send_message(user_id, "❌ Error: Text required.")
-            value = message.text
+            if not message.text: error_msg = "❌ Error: Text required."
+            else: value = message.text
 
-        # 3. SAVE TO DB
+        # 3. IF ERROR, SHOW TOAST AND RETURN (Do not clear state)
+        if error_msg:
+             return await bot.send_message(user_id, error_msg)
+
+        # 4. SAVE TO DB
         await update_configs(user_id, setting_key, value)
-        
-        # 4. DELETE THE OLD PROMPT 
-        if prompt_id:
-            try: await bot.delete_messages(user_id, prompt_id)
-            except: pass
         
         # 5. CLEAR STATE
         temp.USER_STATES.pop(user_id, None)
         
-        # 6. SEND REFRESHED MENU (WZML-X Style)
-        # Use the logic from settings.py to generate the specific menu for this key
+        # 6. EDIT THE PROMPT MESSAGE TO SHOW NEW MENU (WZML-X Style)
         text, markup, thumb_id = await generate_setting_page(user_id, setting_key)
         
-        if thumb_id:
-            await bot.send_photo(user_id, photo=thumb_id, caption="✅ Saved!\n\n" + text, reply_markup=markup)
-        else:
-            await bot.send_message(user_id, f"✅ <b>Saved Successfully!</b>\n\n{text}", reply_markup=markup)
+        if prompt_id:
+            try:
+                # If editing media message (thumb page)
+                if thumb_id: 
+                     await bot.edit_message_media(
+                         chat_id=user_id, 
+                         message_id=prompt_id, 
+                         media=InputMediaPhoto(thumb_id, caption="✅ Saved!\n\n" + text),
+                         reply_markup=markup
+                     )
+                else:
+                    # If setting thumbnail but page has no thumb (deleted), or regular text page
+                     await bot.edit_message_text(
+                         chat_id=user_id, 
+                         message_id=prompt_id, 
+                         text=f"✅ <b>Saved Successfully!</b>\n\n{text}", 
+                         reply_markup=markup
+                     )
+            except Exception as e:
+                # Fallback if edit fails (e.g. type change)
+                try: await bot.delete_messages(user_id, prompt_id)
+                except: pass
+                if thumb_id:
+                     await bot.send_photo(user_id, photo=thumb_id, caption="✅ Saved!\n\n" + text, reply_markup=markup)
+                else:
+                     await bot.send_message(user_id, f"✅ <b>Saved Successfully!</b>\n\n{text}", reply_markup=markup)
         
         return
 
