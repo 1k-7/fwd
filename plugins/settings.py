@@ -37,6 +37,82 @@ SETTING_META = {
     }
 }
 
+async def construct_settings_menu(user_id, key):
+    """
+    Generates the text and markup for a setting menu based on current DB state.
+    Used by both the query handler and the input handler (to refresh view).
+    """
+    configs = await get_configs(user_id)
+    
+    if key == "thumbnail":
+        current_thumb = configs.get('thumbnail')
+        if current_thumb:
+            text = "<b>Custom Thumbnail</b>\n\nYou have a custom thumbnail set."
+            buttons = [
+                [InlineKeyboardButton("View Current", callback_data="settings#viewthumb")],
+                [InlineKeyboardButton("Change", callback_data="settings#changethumb"),
+                 InlineKeyboardButton("Delete", callback_data="settings#delthumb")],
+                [InlineKeyboardButton("Back", callback_data="settings#main")]
+            ]
+            return text, InlineKeyboardMarkup(buttons), current_thumb # Return thumb ID for photo sending
+        else:
+            text = "<b>Custom Thumbnail</b>\n\nNo custom thumbnail set. Default bot thumbnail will be used (if any)."
+            buttons = [
+                [InlineKeyboardButton("Set Thumbnail", callback_data="settings#changethumb")],
+                [InlineKeyboardButton("Back", callback_data="settings#main")]
+            ]
+            return text, InlineKeyboardMarkup(buttons), None
+
+    elif key == "file_size":
+        size_limit_bytes = configs.get('file_size')
+        mode = configs.get('size_limit', 'below')
+        
+        size_display = "Not Set"
+        if size_limit_bytes:
+            mb_value = float(size_limit_bytes) / (1024 * 1024)
+            size_display = f"{mb_value:.2f} MB"
+        
+        mode_display = "Below (Skip larger files)" if mode == 'below' else "Above (Skip smaller files)"
+        
+        text = (
+            "<b>FILE SIZE FILTER</b>\n\n"
+            f"<b>Current Limit:</b> <code>{size_display}</code>\n"
+            f"<b>Mode:</b> <code>{mode_display}</code>\n\n"
+            "Set a limit and choose whether to process files <b>Above</b> or <b>Below</b> that size."
+        )
+        
+        buttons = []
+        buttons.append([InlineKeyboardButton("Set Limit (MB)", callback_data="settings#set#file_size")])
+        toggle_text = "Switch to 'Above'" if mode == 'below' else "Switch to 'Below'"
+        buttons.append([InlineKeyboardButton(toggle_text, callback_data="settings#toggle_size_limit")])
+        
+        if size_limit_bytes:
+            buttons.append([InlineKeyboardButton("Reset Limit", callback_data="settings#reset#file_size")])
+        
+        buttons.append([InlineKeyboardButton("Back", callback_data="settings#main")])
+        return text, InlineKeyboardMarkup(buttons), None
+
+    elif key in SETTING_META:
+        meta = SETTING_META[key]
+        value = configs.get(key)
+        
+        buttons = []
+        if value:
+            buttons.append([InlineKeyboardButton(f"View Value", callback_data=f"settings#view#{key}")])
+        
+        btn_text = "Update Value" if value else f"Set Value"
+        buttons.append([InlineKeyboardButton(btn_text, callback_data=f"settings#set#{key}")])
+        
+        if value:
+            buttons.append([InlineKeyboardButton("Reset Value", callback_data=f"settings#reset#{key}")])
+        
+        buttons.append([InlineKeyboardButton("Back", callback_data="settings#main")])
+        
+        text = f"<b>{meta['title']}</b>\n\n{meta['desc']}"
+        return text, InlineKeyboardMarkup(buttons), None
+    
+    return "Error", None, None
+
 @Client.on_message(filters.private & filters.command(['settings']))
 async def settings(client, message):
     user_id = message.from_user.id
@@ -60,7 +136,7 @@ async def settings(client, message):
 async def settings_query(bot, query):
     user_id = query.from_user.id
     
-    # Clear previous state on navigation
+    # Automatically clear any previous state when navigating menus
     temp.USER_STATES.pop(user_id, None)
 
     if temp.lock.get(user_id):
@@ -83,70 +159,19 @@ async def settings_query(bot, query):
             except:
                 await edit_or_reply(query.message, "<b>Settings</b>\n\nManage personal configurations.", reply_markup=main_buttons())
 
-        # --- SPECIAL MENU: FILE SIZE FILTER (Merged) ---
-        elif type == "file_size":
-            configs = await get_configs(user_id)
-            size_limit_bytes = configs.get('file_size')
-            mode = configs.get('size_limit', 'below') # Default to below if not set
-            
-            size_display = "Not Set"
-            if size_limit_bytes:
-                mb_value = float(size_limit_bytes) / (1024 * 1024)
-                size_display = f"{mb_value:.2f} MB"
-            
-            mode_display = "Below (Skip larger files)" if mode == 'below' else "Above (Skip smaller files)"
-            
-            text = (
-                "<b>FILE SIZE FILTER</b>\n\n"
-                f"<b>Current Limit:</b> <code>{size_display}</code>\n"
-                f"<b>Mode:</b> <code>{mode_display}</code>\n\n"
-                "Set a limit and choose whether to process files <b>Above</b> or <b>Below</b> that size."
-            )
-            
-            buttons = []
-            buttons.append([InlineKeyboardButton("Set Limit (MB)", callback_data="settings#set#file_size")])
-            
-            # Toggle Button
-            toggle_text = "Switch to 'Above'" if mode == 'below' else "Switch to 'Below'"
-            buttons.append([InlineKeyboardButton(toggle_text, callback_data="settings#toggle_size_limit")])
-            
-            if size_limit_bytes:
-                buttons.append([InlineKeyboardButton("Reset Limit", callback_data="settings#reset#file_size")])
-            
-            buttons.append([InlineKeyboardButton("Back", callback_data="settings#main")])
-            
-            await edit_or_reply(query.message, text, reply_markup=InlineKeyboardMarkup(buttons))
+        # --- CENTRALIZED MENU HANDLING ---
+        elif type in ["thumbnail", "file_size"] or type in SETTING_META:
+            text, markup, _ = await construct_settings_menu(user_id, type)
+            await edit_or_reply(query.message, text, reply_markup=markup)
 
         elif type == "toggle_size_limit":
             configs = await get_configs(user_id)
             current_mode = configs.get('size_limit', 'below')
             new_mode = 'above' if current_mode == 'below' else 'below'
             await update_configs(user_id, 'size_limit', new_mode)
-            # Refresh the File Size menu
-            query.data = "settings#file_size"
-            await settings_query(bot, query)
-
-        # --- STANDARD DYNAMIC MENUS ---
-        elif type in SETTING_META:
-            key = type
-            meta = SETTING_META[key]
-            configs = await get_configs(user_id)
-            value = configs.get(key)
-            
-            buttons = []
-            if value:
-                buttons.append([InlineKeyboardButton(f"View Value", callback_data=f"settings#view#{key}")])
-            
-            btn_text = "Update Value" if value else f"Set Value"
-            buttons.append([InlineKeyboardButton(btn_text, callback_data=f"settings#set#{key}")])
-            
-            if value:
-                buttons.append([InlineKeyboardButton("Reset Value", callback_data=f"settings#reset#{key}")])
-            
-            buttons.append([InlineKeyboardButton("Back", callback_data="settings#main")])
-            
-            text = f"<b>{meta['title']}</b>\n\n{meta['desc']}"
-            await edit_or_reply(query.message, text, reply_markup=InlineKeyboardMarkup(buttons))
+            # Refresh
+            text, markup, _ = await construct_settings_menu(user_id, "file_size")
+            await edit_or_reply(query.message, text, reply_markup=markup)
 
         elif type == "view":
             key = data
@@ -159,17 +184,15 @@ async def settings_query(bot, query):
 
         elif type == "set":
             key = data
-            meta = SETTING_META.get(key, {})
-            # Use specific text for file_size since it's now handled via the generic 'set' router but needs specific prompt
             if key == "file_size":
                 text = "<b>FILE SIZE FILTER</b>\n\nSend the size limit in <b>MB</b> (e.g., <code>100</code> or <code>1.5</code>)."
                 back_callback = "settings#file_size"
             else:
+                meta = SETTING_META.get(key, {})
                 text = f"<b>{meta.get('title', 'SETTING')}</b>\n\n{meta.get('desc', 'Send the new value.')}"
                 back_callback = f"settings#{key}"
             
             buttons = [[InlineKeyboardButton("Cancel", callback_data=back_callback)]]
-            
             prompt = await edit_or_reply(query.message, text, reply_markup=InlineKeyboardMarkup(buttons))
             temp.USER_STATES[user_id] = {
                 "state": f"awaiting_setting_{key}",
@@ -180,91 +203,28 @@ async def settings_query(bot, query):
             key = data
             await update_configs(user_id, key, None)
             await query.answer("Value reset to default.", show_alert=True)
-            # Return to appropriate menu
-            if key == "file_size":
-                query.data = "settings#file_size"
-            else:
-                query.data = f"settings#{key}"
-            await settings_query(bot, query)
+            # Refresh
+            text, markup, _ = await construct_settings_menu(user_id, key)
+            await edit_or_reply(query.message, text, reply_markup=markup)
 
-        # --- BOTS & USERBOTS ---
-        elif type == "bots":
-            bots = await db.get_bots(user_id)
-            bot_buttons = []
-            
-            for _bot in bots:
-                if not _bot.get('id'): continue
-                bot_name = _bot.get('name') or _bot.get('username', f"ID: {_bot['id']}")
-                bot_id = _bot.get('id')
-                bot_buttons.append(InlineKeyboardButton(bot_name[:15], callback_data=f"settings#editbot#{bot_id}"))
-
-            if len(bot_buttons) % 2 != 0:
-                bot_buttons.append(InlineKeyboardButton("(｡•̀ᴗ-)", callback_data="settings#empty"))
-
-            buttons = [bot_buttons[i:i + 2] for i in range(0, len(bot_buttons), 2)]
-            
-            buttons.append([
-                InlineKeyboardButton('+ Add Bot', callback_data="settings#addbot"),
-                InlineKeyboardButton('+ Add Userbot', callback_data="settings#adduserbot")
-            ])
-            
-            buttons.append([InlineKeyboardButton('Back', callback_data="settings#main")])
-            
-            text = "<b>Bots & Userbots</b>\n\nManage connected bots and userbots."
-            await edit_or_reply(query.message, text, reply_markup=InlineKeyboardMarkup(buttons))
-
-        elif type == "empty":
-            await query.answer("(｡•̀ᴗ-) Just a placeholder!", show_alert=True)
-
-        elif type == "addbot":
-           text = (
-               "<b>BOT ADDITION</b>\n\n"
-               "Forward the message from <b>@BotFather</b> containing the token, or just send the token string."
-           )
-           buttons = [[InlineKeyboardButton("Cancel", callback_data="settings#bots")]]
-           prompt = await edit_or_reply(query.message, text, reply_markup=InlineKeyboardMarkup(buttons))
-           temp.USER_STATES[user_id] = {
-               "state": "awaiting_bot_token",
-               "prompt_message_id": prompt.id
-           }
-
-        elif type == "adduserbot":
-           text = (
-               "<b>USERBOT ADDITION</b>\n\n"
-               "Send the <b>Pyrogram (v2)</b> session string."
-           )
-           buttons = [[InlineKeyboardButton("Cancel", callback_data="settings#bots")]]
-           prompt = await edit_or_reply(query.message, text, reply_markup=InlineKeyboardMarkup(buttons))
-           temp.USER_STATES[user_id] = {
-               "state": "awaiting_user_session",
-               "prompt_message_id": prompt.id
-           }
-
-        # --- THUMBNAIL ---
-        elif type == "thumbnail":
-            user_configs = await get_configs(user_id)
-            current_thumb = user_configs.get('thumbnail')
-            
-            if current_thumb:
-                text = "<b>Custom Thumbnail</b>\n\nYou have a custom thumbnail set."
-                buttons = [
-                    [InlineKeyboardButton("View Current", callback_data="settings#viewthumb")],
-                    [InlineKeyboardButton("Change", callback_data="settings#changethumb"),
-                     InlineKeyboardButton("Delete", callback_data="settings#delthumb")],
-                    [InlineKeyboardButton("Back", callback_data="settings#main")]
-                ]
-            else:
-                text = "<b>Custom Thumbnail</b>\n\nNo custom thumbnail set. Default bot thumbnail will be used (if any)."
-                buttons = [
-                    [InlineKeyboardButton("Set Thumbnail", callback_data="settings#changethumb")],
-                    [InlineKeyboardButton("Back", callback_data="settings#main")]
-                ]
-            
-            await edit_or_reply(query.message, text, reply_markup=InlineKeyboardMarkup(buttons))
+        elif type == "changethumb":
+            buttons = [[InlineKeyboardButton("Cancel", callback_data="settings#thumbnail")]]
+            prompt = await edit_or_reply(query.message, "<b>Send a Photo</b> to set as your custom thumbnail.", reply_markup=InlineKeyboardMarkup(buttons))
+            temp.USER_STATES[user_id] = {
+                "state": "awaiting_setting_thumbnail",
+                "prompt_message_id": prompt.id
+            }
+        
+        elif type == "delthumb":
+            await update_configs(user_id, 'thumbnail', None)
+            await query.answer("Thumbnail deleted!", show_alert=True)
+            # Refresh
+            text, markup, _ = await construct_settings_menu(user_id, "thumbnail")
+            await edit_or_reply(query.message, text, reply_markup=markup)
 
         elif type == "viewthumb":
-            user_configs = await get_configs(user_id)
-            thumb_id = user_configs.get('thumbnail')
+            configs = await get_configs(user_id)
+            thumb_id = configs.get('thumbnail')
             if not thumb_id:
                 return await query.answer("Thumbnail not found!", show_alert=True)
             
@@ -276,20 +236,6 @@ async def settings_query(bot, query):
                 )
             except Exception as e:
                 await query.message.reply_photo(thumb_id, caption="<b>Current Custom Thumbnail</b>", reply_markup=InlineKeyboardMarkup(buttons))
-
-        elif type == "delthumb":
-            await update_configs(user_id, 'thumbnail', None)
-            await query.answer("Thumbnail deleted!", show_alert=True)
-            query.data = "settings#thumbnail"
-            await settings_query(bot, query)
-
-        elif type == "changethumb":
-            buttons = [[InlineKeyboardButton("Cancel", callback_data="settings#thumbnail")]]
-            prompt = await edit_or_reply(query.message, "<b>Send a Photo</b> to set as your custom thumbnail.", reply_markup=InlineKeyboardMarkup(buttons))
-            temp.USER_STATES[user_id] = {
-                "state": "awaiting_setting_thumbnail",
-                "prompt_message_id": prompt.id
-            }
 
         # --- FILTERS ---
         elif type == "filters":
@@ -304,7 +250,50 @@ async def settings_query(bot, query):
             await update_configs(user_id, 'filters', current_filters)
             await query.message.edit_reply_markup(reply_markup=await get_filters_markup(user_id))
 
-        # --- BOTS & CHANNELS SUBMENUS ---
+        # --- BOTS & CHANNELS ---
+        elif type == "bots":
+            bots = await db.get_bots(user_id)
+            bot_buttons = []
+            for _bot in bots:
+                if not _bot.get('id'): continue
+                bot_name = _bot.get('name') or _bot.get('username', f"ID: {_bot['id']}")
+                bot_id = _bot.get('id')
+                bot_buttons.append(InlineKeyboardButton(bot_name[:15], callback_data=f"settings#editbot#{bot_id}"))
+
+            if len(bot_buttons) % 2 != 0:
+                bot_buttons.append(InlineKeyboardButton("(｡•̀ᴗ-)", callback_data="settings#empty"))
+
+            buttons = [bot_buttons[i:i + 2] for i in range(0, len(bot_buttons), 2)]
+            buttons.append([
+                InlineKeyboardButton('+ Add Bot', callback_data="settings#addbot"),
+                InlineKeyboardButton('+ Add Userbot', callback_data="settings#adduserbot")
+            ])
+            buttons.append([InlineKeyboardButton('Back', callback_data="settings#main")])
+            
+            text = "<b>Bots & Userbots</b>\n\nManage connected bots and userbots."
+            await edit_or_reply(query.message, text, reply_markup=InlineKeyboardMarkup(buttons))
+
+        elif type == "empty":
+            await query.answer("(｡•̀ᴗ-) Just a placeholder!", show_alert=True)
+
+        elif type == "addbot":
+           text = "<b>BOT ADDITION</b>\n\nForward the message from <b>@BotFather</b> containing the token, or just send the token string."
+           buttons = [[InlineKeyboardButton("Cancel", callback_data="settings#bots")]]
+           prompt = await edit_or_reply(query.message, text, reply_markup=InlineKeyboardMarkup(buttons))
+           temp.USER_STATES[user_id] = {
+               "state": "awaiting_bot_token",
+               "prompt_message_id": prompt.id
+           }
+
+        elif type == "adduserbot":
+           text = "<b>USERBOT ADDITION</b>\n\nSend the <b>Pyrogram (v2)</b> session string."
+           buttons = [[InlineKeyboardButton("Cancel", callback_data="settings#bots")]]
+           prompt = await edit_or_reply(query.message, text, reply_markup=InlineKeyboardMarkup(buttons))
+           temp.USER_STATES[user_id] = {
+               "state": "awaiting_user_session",
+               "prompt_message_id": prompt.id
+           }
+
         elif type.startswith("editbot"):
            bot_id = int(data)
            _bot = await db.get_bot(user_id, bot_id)
@@ -314,7 +303,6 @@ async def settings_query(bot, query):
            uname_display = f"@{bot_uname}" if bot_uname else "Not Set"
            buttons = [[InlineKeyboardButton('Remove', callback_data=f"settings#removebot#{bot_id}")],
                       [InlineKeyboardButton('Back', callback_data="settings#bots")]]
-           
            await edit_or_reply(query.message, TEXT.format(bot_name, bot_id, uname_display), reply_markup=InlineKeyboardMarkup(buttons))
 
         elif type.startswith("removebot"):
@@ -330,7 +318,6 @@ async def settings_query(bot, query):
                 buttons.append([InlineKeyboardButton(f"● {channel['title']}", callback_data=f"settings#editchannel#{channel['chat_id']}")])
             buttons.append([InlineKeyboardButton('+ Add Channel', callback_data="settings#addchannel")])
             buttons.append([InlineKeyboardButton('Back', callback_data="settings#main")])
-            
             text = "<b>Target Channels</b>\n\nManage target chats for forwarding."
             await edit_or_reply(query.message, text, reply_markup=InlineKeyboardMarkup(buttons))
         
@@ -366,7 +353,6 @@ async def get_filters_markup(user_id):
     for key in filter_keys:
         status = "✓" if filters.get(key, True) else "✗"
         buttons.append(InlineKeyboardButton(f"{status} {key.title()}", callback_data=f"settings#toggle_filter#{key}"))
-    
     markup = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
     markup.append([InlineKeyboardButton('Back', callback_data="settings#main")])
     return InlineKeyboardMarkup(markup)

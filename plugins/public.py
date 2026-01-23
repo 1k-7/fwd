@@ -9,35 +9,12 @@ from config import temp
 from translation import Translation
 from .test import CLIENT, update_configs, get_configs
 from .unequify import process_unequify_target
+from .settings import construct_settings_menu, SETTING_META  # Import from settings for consistency
 from pyrogram import Client, filters, enums
 from pyrogram.errors import PeerIdInvalid, MessageNotModified
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery, Message
 
 logger = logging.getLogger(__name__)
-
-# Metadata to reconstruct menus
-SETTING_META = {
-    "caption": {
-        "title": "CAPTION SETTING",
-        "desc": "Send your custom caption.\n\nUse placeholders like <code>{filename}</code>, <code>{size}</code>, and <code>{caption}</code>."
-    },
-    "button": {
-        "title": "BUTTON SETTINGS",
-        "desc": "Send your button in the format:\n<code>[Button Text][buttonurl:https://example.com]</code>"
-    },
-    "db_uri": {
-        "title": "DUPLICATE CHECK DB",
-        "desc": "Send your MongoDB connection string to be used for duplicate checking."
-    },
-    "extension": {
-        "title": "EXTENSION FILTER",
-        "desc": "Send a comma-separated list of file extensions to filter (e.g., <code>mkv,mp4,zip</code>)."
-    },
-    "keywords": {
-        "title": "KEYWORD FILTER",
-        "desc": "Send a comma-separated list of keywords to filter.\nUse a <code>-</code> prefix to exclude messages with a keyword (e.g., <code>cat,-dog</code>)."
-    }
-}
 
 def parse_message_input(message):
     """Parses a forwarded message or a message link."""
@@ -141,7 +118,7 @@ async def stateful_message_handler(bot: Client, message: Message):
     current_state = state_info.get("state")
     prompt_id = state_info.get("prompt_message_id")
 
-    # --- HANDLE CANCEL COMMAND ---
+    # --- HANDLE CANCEL ---
     if message.text and message.text.lower() == "/cancel":
         if prompt_id:
             try: await bot.delete_messages(user_id, prompt_id)
@@ -156,7 +133,7 @@ async def stateful_message_handler(bot: Client, message: Message):
         setting_key = current_state.split("awaiting_setting_")[1]
         value = None
         
-        # 1. DELETE USER INPUT IMMEDIATELY (Clean UI)
+        # 1. DELETE USER INPUT (Immediate cleanup)
         try: await message.delete()
         except: pass
         
@@ -195,80 +172,33 @@ async def stateful_message_handler(bot: Client, message: Message):
                 return await bot.send_message(user_id, "❌ Invalid media. Send a Photo or an Image Document.")
         
         else: 
-            # Caption, extensions, keywords
             if not message.text:
                  return await bot.send_message(user_id, "❌ Error: Text required.")
             value = message.text
 
-        # 3. SAVE TO DB
+        # 3. SAVE TO DB (Wait for completion)
         await update_configs(user_id, setting_key, value)
         
-        # 4. DELETE THE OLD PROMPT (To avoid clutter)
+        # 4. DELETE THE OLD PROMPT 
         if prompt_id:
             try: await bot.delete_messages(user_id, prompt_id)
             except: pass
         
-        # 5. CLEAR STATE & RESTORE MENU
+        # 5. CLEAR STATE
         temp.USER_STATES.pop(user_id, None)
         
-        # --- RE-SEND THE CORRECT MENU ---
-        if setting_key == "thumbnail":
-            # Thumbnail Menu
-            buttons = [
-                [InlineKeyboardButton("View Current", callback_data="settings#viewthumb")],
-                [InlineKeyboardButton("Change", callback_data="settings#changethumb"),
-                 InlineKeyboardButton("Delete", callback_data="settings#delthumb")],
-                [InlineKeyboardButton("Back", callback_data="settings#main")]
-            ]
-            # Send as photo if we have the file_id, else text
-            try:
-                await bot.send_photo(user_id, photo=value, caption="<b>Custom Thumbnail</b>\n\nThumbnail saved successfully!", reply_markup=InlineKeyboardMarkup(buttons))
-            except:
-                await bot.send_message(user_id, "<b>Custom Thumbnail</b>\n\nThumbnail saved successfully!", reply_markup=InlineKeyboardMarkup(buttons))
+        # 6. SEND REFRESHED MENU
+        text, markup, thumb_id = await construct_settings_menu(user_id, setting_key)
         
-        elif setting_key == "file_size":
-             # File Size Menu
-             configs = await get_configs(user_id)
-             size_limit_bytes = configs.get('file_size')
-             mode = configs.get('size_limit', 'below')
-             
-             size_display = "Not Set"
-             if size_limit_bytes:
-                mb_value = float(size_limit_bytes) / (1024 * 1024)
-                size_display = f"{mb_value:.2f} MB"
-             mode_display = "Below (Skip larger files)" if mode == 'below' else "Above (Skip smaller files)"
-             
-             text = (
-                "<b>FILE SIZE FILTER</b>\n\n"
-                f"<b>Current Limit:</b> <code>{size_display}</code>\n"
-                f"<b>Mode:</b> <code>{mode_display}</code>\n\n"
-                "✅ Limit updated successfully."
-            )
-             buttons = [
-                 [InlineKeyboardButton("Set Limit (MB)", callback_data="settings#set#file_size")],
-                 [InlineKeyboardButton(f"Switch to '{'Above' if mode == 'below' else 'Below'}'", callback_data="settings#toggle_size_limit")],
-                 [InlineKeyboardButton("Reset Limit", callback_data="settings#reset#file_size")],
-                 [InlineKeyboardButton("Back", callback_data="settings#main")]
-             ]
-             await bot.send_message(user_id, text, reply_markup=InlineKeyboardMarkup(buttons))
-
-        elif setting_key in SETTING_META:
-            # Generic Menus (Caption, Button, etc.)
-            meta = SETTING_META[setting_key]
-            buttons = [
-                [InlineKeyboardButton("View Value", callback_data=f"settings#view#{setting_key}")],
-                [InlineKeyboardButton("Update Value", callback_data=f"settings#set#{setting_key}")],
-                [InlineKeyboardButton("Reset Value", callback_data=f"settings#reset#{setting_key}")],
-                [InlineKeyboardButton("Back", callback_data="settings#main")]
-            ]
-            await bot.send_message(user_id, f"<b>{meta['title']}</b>\n\n✅ Value saved successfully.", reply_markup=InlineKeyboardMarkup(buttons))
+        if thumb_id:
+            await bot.send_photo(user_id, photo=thumb_id, caption="✅ Thumbnail saved.\n\n" + text, reply_markup=markup)
         else:
-            await bot.send_message(user_id, f"✅ **{setting_key.replace('_', ' ').title()}** has been updated.")
+            # Prepend a success emoji/msg to the standard menu text so user knows it worked
+            await bot.send_message(user_id, f"✅ <b>Saved Successfully!</b>\n\n{text}", reply_markup=markup)
         
         return
 
-    # --- PM TARGET / SOURCE HANDLERS (Existing logic preserved) ---
-    # (Delete user msg for cleanliness)
+    # --- PM TARGET / SOURCE HANDLERS (Same as before but with cleanup) ---
     try: await message.delete()
     except: pass
     
