@@ -374,3 +374,133 @@ def main_buttons():
         InlineKeyboardButton('Back', callback_data='back')
     ]]
     return InlineKeyboardMarkup(buttons)
+
+# --- SETTINGS INPUT HANDLER ---
+@Client.on_message(filters.private & filters.incoming, group=-1)
+async def settings_input_handler(bot: Client, message: Message):
+    if message.edit_date: return
+
+    user_id = message.from_user.id
+    state_info = temp.USER_STATES.get(user_id)
+    if not state_info: return
+
+    current_state = state_info.get("state")
+    prompt_id = state_info.get("prompt_message_id")
+    
+    # Check if this handler is responsible
+    relevant_states = ["awaiting_bot_token", "awaiting_user_session", "awaiting_channel_forward"]
+    is_setting = current_state and current_state.startswith("awaiting_setting_")
+    
+    if not (is_setting or current_state in relevant_states):
+        return # Let public.py handle other states
+
+    # --- HANDLE CANCEL ---
+    if message.text and message.text.lower() == "/cancel":
+        if prompt_id:
+            try: await bot.delete_messages(user_id, prompt_id)
+            except: pass
+        temp.USER_STATES.pop(user_id, None)
+        try: await message.delete() 
+        except: pass
+        await message.reply(Translation.CANCEL)
+        message.stop_propagation()
+        return
+
+    # --- SETTINGS INPUT ---
+    if is_setting:
+        setting_key = current_state.split("awaiting_setting_")[1]
+        value = None
+        error_msg = None
+        
+        try: await message.delete()
+        except: pass
+        
+        if message.text and message.text.lower() == "/reset": 
+            value = None
+        elif setting_key == "file_size":
+            if not message.text: error_msg = "❌ Error: Please send a number."
+            else:
+                try: value = float(message.text) * 1024 * 1024
+                except ValueError: error_msg = "❌ Invalid number. Please enter a valid number (e.g., 10 or 2.5)."
+        elif setting_key == "button":
+             if not message.text: error_msg = "❌ Error: Text required."
+             elif not parse_buttons(message.text, markup=False): error_msg = "❌ Invalid button format.\n\nUse: `[Text][buttonurl:link]`"
+             else: value = message.text
+        elif setting_key == "db_uri":
+             if not message.text: error_msg = "❌ Error: Text required."
+             elif not (message.text.startswith("mongodb") or message.text.startswith("mongodb+srv")): error_msg = "❌ Invalid MongoDB URI. It must start with `mongodb`."
+             else: value = message.text
+        elif setting_key == "thumbnail":
+            if message.photo: value = message.photo.file_id
+            elif message.document and message.document.mime_type.startswith("image/"): value = message.document.file_id
+            else: error_msg = "❌ Invalid media. Send a Photo or an Image Document."
+        else: 
+            if not message.text: error_msg = "❌ Error: Text required."
+            else: value = message.text
+
+        if error_msg:
+             sent = await bot.send_message(user_id, error_msg)
+             # Don't stop propagation of errors generally, but here we consumed the message
+             message.stop_propagation()
+             return
+
+        await update_configs(user_id, setting_key, value)
+        temp.USER_STATES.pop(user_id, None)
+        
+        # REFRESH MENU (WZML-X Style)
+        text, markup, thumb_id = await generate_setting_page(user_id, setting_key)
+        
+        if prompt_id:
+            try:
+                if thumb_id: 
+                     await bot.edit_message_media(chat_id=user_id, message_id=prompt_id, 
+                         media=InputMediaPhoto(thumb_id, caption="✅ Saved!\n\n" + text), reply_markup=markup)
+                else:
+                     await bot.edit_message_text(chat_id=user_id, message_id=prompt_id, 
+                         text=f"✅ <b>Saved Successfully!</b>\n\n{text}", reply_markup=markup)
+            except Exception:
+                # If edit fails (e.g. type mismatch), delete and send new
+                try: await bot.delete_messages(user_id, prompt_id)
+                except: pass
+                if thumb_id: await bot.send_photo(user_id, photo=thumb_id, caption="✅ Saved!\n\n" + text, reply_markup=markup)
+                else: await bot.send_message(user_id, f"✅ <b>Saved Successfully!</b>\n\n{text}", reply_markup=markup)
+    
+    # --- CHANNEL FORWARD ---
+    elif current_state == "awaiting_channel_forward":
+        try: await message.delete()
+        except: pass
+        if prompt_id:
+            try: await bot.delete_messages(user_id, prompt_id)
+            except: pass
+
+        if not message.forward_date: 
+            await bot.send_message(user_id, "❌ Not a forwarded message.\nPlease forward a message from the target channel.")
+        else:
+            chat_id, title = message.forward_from_chat.id, message.forward_from_chat.title
+            username = f"@{message.forward_from_chat.username}" if message.forward_from_chat.username else "private"
+            if await db.in_channel(user_id, chat_id): await bot.send_message(user_id, "This channel has already been added.")
+            else: 
+                await db.add_channel(user_id, chat_id, title, username)
+                await bot.send_message(user_id, "Channel added. ✓")
+        temp.USER_STATES.pop(user_id, None)
+    
+    # --- BOT / USERBOT ADDITION ---
+    elif current_state == "awaiting_bot_token":
+        try: await message.delete()
+        except: pass
+        if prompt_id:
+             try: await bot.delete_messages(user_id, prompt_id)
+             except: pass
+        await CLIENT().add_bot(bot, message)
+        temp.USER_STATES.pop(user_id, None)
+    
+    elif current_state == "awaiting_user_session":
+        try: await message.delete()
+        except: pass
+        if prompt_id:
+             try: await bot.delete_messages(user_id, prompt_id)
+             except: pass
+        await CLIENT().add_session(bot, message)
+        temp.USER_STATES.pop(user_id, None)
+
+    message.stop_propagation()

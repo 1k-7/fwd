@@ -2,13 +2,13 @@
 import re
 import asyncio
 import logging
-from .utils import STS, start_range_selection, update_range_message, edit_or_reply, parse_buttons
+from uuid import uuid4
+from .utils import STS, start_range_selection, update_range_message, edit_or_reply
 from database import db
 from config import temp
 from translation import Translation
 from .test import CLIENT, update_configs, get_configs
 from .unequify import process_unequify_target
-from .settings import generate_setting_page, SETTING_META
 from pyrogram import Client, filters, enums
 from pyrogram.errors import PeerIdInvalid, MessageNotModified
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery, Message
@@ -117,7 +117,12 @@ async def stateful_message_handler(bot: Client, message: Message):
     current_state = state_info.get("state")
     prompt_id = state_info.get("prompt_message_id")
 
-    # --- HANDLE CANCEL COMMAND ---
+    # Check if this handler is responsible
+    # Public.py now only handles: Source, PM Target, Range Edit, Unequify
+    if current_state.startswith("awaiting_setting_") or current_state in ["awaiting_bot_token", "awaiting_user_session", "awaiting_channel_forward"]:
+        return # Let settings.py handle it
+
+    # --- HANDLE CANCEL ---
     if message.text and message.text.lower() == "/cancel":
         if prompt_id:
             try: await bot.delete_messages(user_id, prompt_id)
@@ -125,96 +130,8 @@ async def stateful_message_handler(bot: Client, message: Message):
         temp.USER_STATES.pop(user_id, None)
         try: await message.delete() 
         except: pass
-        return await message.reply(Translation.CANCEL)
-
-    # --- SETTINGS INPUT HANDLER (WZML-X FLOW) ---
-    if current_state and current_state.startswith("awaiting_setting_"):
-        setting_key = current_state.split("awaiting_setting_")[1]
-        value = None
-        error_msg = None
-        
-        # 1. DELETE USER INPUT IMMEDIATELY
-        try: await message.delete()
-        except: pass
-        
-        # 2. PARSE & VALIDATE
-        if message.text and message.text.lower() == "/reset": 
-            value = None
-            
-        elif setting_key == "file_size":
-            if not message.text: error_msg = "❌ Error: Please send a number."
-            else:
-                try: 
-                    value = float(message.text) * 1024 * 1024
-                except ValueError: 
-                    error_msg = "❌ Invalid number. Please enter a valid number (e.g., 10 or 2.5)."
-        
-        elif setting_key == "button":
-             if not message.text: error_msg = "❌ Error: Text required."
-             elif not parse_buttons(message.text, markup=False):
-                 error_msg = "❌ Invalid button format.\n\nUse: `[Text][buttonurl:link]`"
-             else:
-                 value = message.text
-             
-        elif setting_key == "db_uri":
-             if not message.text: error_msg = "❌ Error: Text required."
-             elif not (message.text.startswith("mongodb") or message.text.startswith("mongodb+srv")):
-                 error_msg = "❌ Invalid MongoDB URI. It must start with `mongodb`."
-             else:
-                 value = message.text
-             
-        elif setting_key == "thumbnail":
-            if message.photo:
-                value = message.photo.file_id
-            elif message.document and message.document.mime_type.startswith("image/"):
-                value = message.document.file_id
-            else:
-                error_msg = "❌ Invalid media. Send a Photo or an Image Document."
-        
-        else: 
-            if not message.text: error_msg = "❌ Error: Text required."
-            else: value = message.text
-
-        # 3. IF ERROR, SHOW TOAST AND RETURN (Do not clear state)
-        if error_msg:
-             return await bot.send_message(user_id, error_msg)
-
-        # 4. SAVE TO DB
-        await update_configs(user_id, setting_key, value)
-        
-        # 5. CLEAR STATE
-        temp.USER_STATES.pop(user_id, None)
-        
-        # 6. EDIT THE PROMPT MESSAGE TO SHOW NEW MENU (WZML-X Style)
-        text, markup, thumb_id = await generate_setting_page(user_id, setting_key)
-        
-        if prompt_id:
-            try:
-                # If editing media message (thumb page)
-                if thumb_id: 
-                     await bot.edit_message_media(
-                         chat_id=user_id, 
-                         message_id=prompt_id, 
-                         media=InputMediaPhoto(thumb_id, caption="✅ Saved!\n\n" + text),
-                         reply_markup=markup
-                     )
-                else:
-                    # If setting thumbnail but page has no thumb (deleted), or regular text page
-                     await bot.edit_message_text(
-                         chat_id=user_id, 
-                         message_id=prompt_id, 
-                         text=f"✅ <b>Saved Successfully!</b>\n\n{text}", 
-                         reply_markup=markup
-                     )
-            except Exception as e:
-                # Fallback if edit fails (e.g. type change)
-                try: await bot.delete_messages(user_id, prompt_id)
-                except: pass
-                if thumb_id:
-                     await bot.send_photo(user_id, photo=thumb_id, caption="✅ Saved!\n\n" + text, reply_markup=markup)
-                else:
-                     await bot.send_message(user_id, f"✅ <b>Saved Successfully!</b>\n\n{text}", reply_markup=markup)
-        
+        await message.reply(Translation.CANCEL)
+        message.stop_propagation()
         return
 
     # --- PM TARGET / SOURCE HANDLERS ---
@@ -352,29 +269,6 @@ async def stateful_message_handler(bot: Client, message: Message):
             await bot.send_message(user_id, "❌ Invalid ID. Please send a number.")
             return
 
-    elif current_state == "awaiting_channel_forward":
-        if not message.forward_date: 
-            await bot.send_message(user_id, "❌ Not a forwarded message.\nPlease forward a message from the target channel.")
-            return
-        
-        chat_id, title = message.forward_from_chat.id, message.forward_from_chat.title
-        username = f"@{message.forward_from_chat.username}" if message.forward_from_chat.username else "private"
-        
-        if await db.in_channel(user_id, chat_id): 
-            await bot.send_message(user_id, "This channel has already been added.")
-        else: 
-            await db.add_channel(user_id, chat_id, title, username)
-            await bot.send_message(user_id, "Channel added. ✓")
-        temp.USER_STATES.pop(user_id, None)
-    
-    elif current_state == "awaiting_bot_token":
-        await CLIENT().add_bot(bot, message)
-        temp.USER_STATES.pop(user_id, None)
-    
-    elif current_state == "awaiting_user_session":
-        await CLIENT().add_session(bot, message)
-        temp.USER_STATES.pop(user_id, None)
-
     elif current_state == "awaiting_unequify_manual_target":
         userbot_id = temp.UNEQUIFY_USERBOT_ID.get(user_id)
         if not userbot_id: 
@@ -398,6 +292,8 @@ async def stateful_message_handler(bot: Client, message: Message):
             
         await process_unequify_target(bot, message, user_id, userbot_id, selected_chat.id)
         temp.USER_STATES.pop(user_id, None)
+        
+    message.stop_propagation()
 
 @Client.on_callback_query(filters.regex(r"^range_"))
 async def range_selection_callbacks(bot, query):
