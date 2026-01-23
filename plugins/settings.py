@@ -1,4 +1,3 @@
-# plugins/settings.py
 import asyncio
 import random
 import logging
@@ -84,7 +83,7 @@ async def settings_query(bot, query):
             except:
                 await edit_or_reply(query.message, "<b>Settings</b>\n\nManage personal configurations.", reply_markup=main_buttons())
 
-        # --- SPECIAL MENU: FILE SIZE FILTER ---
+        # --- SPECIAL MENU: FILE SIZE FILTER (Merged) ---
         elif type == "file_size":
             configs = await get_configs(user_id)
             size_limit_bytes = configs.get('file_size')

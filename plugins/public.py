@@ -1,9 +1,9 @@
-# plugins/public.py
-
 import re
 import asyncio
 import logging
-from .utils import start_range_selection, update_range_message, edit_or_reply, parse_buttons
+import random
+from uuid import uuid4
+from .utils import STS, start_range_selection, update_range_message, edit_or_reply, parse_buttons
 from database import db
 from config import temp
 from translation import Translation
@@ -11,7 +11,7 @@ from .test import CLIENT, update_configs, get_configs
 from .unequify import process_unequify_target
 from pyrogram import Client, filters, enums
 from pyrogram.errors import PeerIdInvalid, MessageNotModified
-from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message, InputMediaPhoto
+from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery, Message
 
 logger = logging.getLogger(__name__)
 
