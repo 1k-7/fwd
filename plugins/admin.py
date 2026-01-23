@@ -1,6 +1,6 @@
 import os, sys, asyncio, time
 from config import *
-from database import *
+from database import db
 from .utils import get_readable_time
 from translation import *
 from pyrogram import filters, Client

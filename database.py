@@ -6,15 +6,6 @@ from os import environ
 DB_NAME = Config.DB_NAME
 DB_URL = Config.DB_URL
 
-# Define a global variable for the database instance, initially None.
-db = None
-
-def initialize_database():
-    """Initializes the database connection and assigns it to the global 'db' variable."""
-    global db
-    if db is None:
-        db = Database(DB_URL, DB_NAME)
-
 async def mongodb_version():
     """Asynchronously gets the MongoDB server version."""
     client = AsyncIOMotorClient(Config.DB_URL)
@@ -184,3 +175,6 @@ class Database:
 
     async def get_all_tasks(self):
         return self.tasks.find({})
+
+# Initialize directly
+db = Database(DB_URL, DB_NAME)

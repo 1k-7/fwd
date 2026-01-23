@@ -16,7 +16,12 @@ from pyrogram.enums import ParseMode, MessageMediaType
 from pyrogram.errors import FloodWait, MessageNotModified, RPCError, MediaEmpty, UserIsBlocked, PeerIdInvalid
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery, Message
 
-CLIENT = CLIENT()
+# Use the CLIENT class from test.py directly, do not re-instantiate globally here if not needed
+# or instantiate it once safely.
+# CLIENT = CLIENT()  <-- REMOVED to avoid conflicts, use CLIENT from test.py if it's an instance, 
+# or instantiate locally.
+# Looking at test.py, CLIENT is a class. We should instantiate it when needed.
+
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
@@ -57,7 +62,9 @@ async def run_forwarding_task(bot, user_id, frwd_id, bot_id, sts, message_obj):
             mode_label = "Userbot (Direct Copy)"
 
         await msg_edit(message_obj, "Starting client...")
-        client_instance = await start_clone_bot(CLIENT.client(_bot_data), _bot_data)
+        # Instantiate CLIENT class here
+        client_helper = CLIENT() 
+        client_instance = await start_clone_bot(client_helper.client(_bot_data), _bot_data)
         
         await msg_edit(message_obj, "Accessing channels...")
 

@@ -158,6 +158,7 @@ async def list_userbot_chats(bot: Client, message: Message, user_id: int, userbo
 
     text, serial = "<b>List of recent chats (up to 50):</b>\n\n", 1
     try:
+        # INSTANTIATE CLIENT() HERE
         async with CLIENT().client(userbot_config) as userbot:
             async for dialog in userbot.get_dialogs(limit=50):
                 text += f"<b>{serial}.</b> {dialog.chat.title} (<code>{dialog.chat.id}</code>)\n"
