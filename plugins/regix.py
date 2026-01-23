@@ -1,4 +1,4 @@
-# mistaldrin/fwd/fwd-DawnUltra/plugins/regix.py
+# plugins/regix.py
 
 import re
 import os
@@ -6,7 +6,7 @@ import asyncio
 import logging
 import math
 import time
-from .utils import STS, format_thumbnail
+from .utils import STS, format_thumbnail, edit_or_reply
 from database import db
 from .test import CLIENT, start_clone_bot
 from config import Config, temp
@@ -48,16 +48,13 @@ async def run_forwarding_task(bot, user_id, frwd_id, bot_id, sts, message_obj):
                 # 2. Format it (Resize, Crop, JPEG, <200KB)
                 if raw_thumb:
                     thumb_path = await format_thumbnail(raw_thumb)
-                    # Clean up raw file if different
                     if thumb_path != raw_thumb and os.path.exists(raw_thumb):
                         os.remove(raw_thumb)
             except Exception as e:
                 logger.error(f"Failed to prepare thumbnail: {e}")
-                # Continue without thumb if fail
         # -----------------------
 
         is_bot_mode = _bot_data.get('is_bot', False)
-        # Label adjustment
         if thumb_path:
             mode_label = "Custom Thumb (Send By File ID)"
         elif is_bot_mode:
@@ -174,15 +171,29 @@ async def run_forwarding_task(bot, user_id, frwd_id, bot_id, sts, message_obj):
                 try:
                     capt = custom_caption(message, caption)
                     
-                    # LOGIC:
-                    # 1. If Thumb exists: MUST use send_<media>(file_id) to apply thumb.
-                    # 2. If Bot (No Thumb): MUST use send_<media>(file_id) to bypass restrictions.
-                    # 3. If Userbot (No Thumb): Use copy_message (Best for structure/speed).
-                    
                     use_send_method = (thumb_path is not None) or is_bot_mode
 
+                    # ---------------- VIDEO COVER IMPLEMENTATION ----------------
+                    # Checks: It is a Video, we have a custom thumb, and it is NOT a document.
+                    if message.video and thumb_path and not message.document:
+                        try:
+                            # Use pyrotgfork's video_cover parameter in copy
+                            await message.copy(
+                                i.TO,
+                                caption=capt,
+                                reply_markup=button,
+                                protect_content=protect,
+                                video_cover=thumb_path # Pass the local path
+                            )
+                            sts.add('total_files')
+                            if not forward_tag: await asyncio.sleep(delay)
+                            continue # Skip the rest of the loop for this message
+                        except Exception as e_vc:
+                            # Fallback if video_cover fails or is not supported in current context
+                            logger.error(f"Copy with video_cover failed: {e_vc}. Falling back to standard send.")
+                    # ------------------------------------------------------------
+
                     if use_send_method and message.media:
-                        # Helper to prepare args
                         send_args = {
                             "chat_id": i.TO, 
                             "caption": capt, 
@@ -191,42 +202,31 @@ async def run_forwarding_task(bot, user_id, frwd_id, bot_id, sts, message_obj):
                         }
                         
                         try:
-                            # Use open() for binary file reading if thumb exists
                             thumb_file = open(thumb_path, 'rb') if thumb_path else None
                             
                             if message.photo:
-                                # Photos do NOT support 'thumb'
                                 await client_instance.send_photo(photo=message.photo.file_id, **send_args)
-                            
                             elif message.video:
                                 if thumb_file: send_args['thumb'] = thumb_file
                                 await client_instance.send_video(video=message.video.file_id, **send_args)
-                            
                             elif message.document:
                                 if thumb_file: send_args['thumb'] = thumb_file
                                 await client_instance.send_document(document=message.document.file_id, **send_args)
-                            
                             elif message.audio:
                                 if thumb_file: send_args['thumb'] = thumb_file
                                 await client_instance.send_audio(audio=message.audio.file_id, **send_args)
-                            
                             elif message.voice:
                                 if thumb_file: send_args['thumb'] = thumb_file
                                 await client_instance.send_voice(voice=message.voice.file_id, **send_args)
-                            
                             elif message.animation:
                                 if thumb_file: send_args['thumb'] = thumb_file
                                 await client_instance.send_animation(animation=message.animation.file_id, **send_args)
-                            
                             elif message.sticker:
                                 await client_instance.send_sticker(chat_id=i.TO, sticker=message.sticker.file_id) 
-                            
                             elif message.video_note:
                                 if thumb_file: send_args['thumb'] = thumb_file
                                 await client_instance.send_video_note(chat_id=i.TO, video_note=message.video_note.file_id)
-                            
                             else:
-                                # Fallback -> Copy
                                 await message.copy(i.TO, caption=capt, reply_markup=button, protect_content=protect)
                             
                             if thumb_file: thumb_file.close()
@@ -234,8 +234,6 @@ async def run_forwarding_task(bot, user_id, frwd_id, bot_id, sts, message_obj):
 
                         except Exception as e_send:
                             if thumb_file: thumb_file.close()
-                            
-                            # If send fails (e.g., thumb format issue), try copy as last resort
                             if thumb_path:
                                 logger.error(f"Send with thumb failed: {e_send}. Trying copy (thumb will be lost).")
                                 await message.copy(i.TO, caption=capt, reply_markup=button, protect_content=protect)
@@ -248,7 +246,6 @@ async def run_forwarding_task(bot, user_id, frwd_id, bot_id, sts, message_obj):
                          sts.add('total_files')
 
                     else:
-                        # Userbot + No Thumb + Media -> Direct Copy
                         await message.copy(chat_id=i.TO, caption=capt, reply_markup=button, protect_content=protect)
                         sts.add('total_files')
                     
@@ -273,7 +270,6 @@ async def run_forwarding_task(bot, user_id, frwd_id, bot_id, sts, message_obj):
         await msg_edit(message_obj, f"An error occurred: `{e}`")
 
     finally:
-        # CLEANUP THUMB
         if thumb_path and os.path.exists(thumb_path):
             try: os.remove(thumb_path)
             except: pass
@@ -281,7 +277,6 @@ async def run_forwarding_task(bot, user_id, frwd_id, bot_id, sts, message_obj):
         await edit_progress(message_obj, sts, final_status, extra_info if 'extra_info' in locals() else None)
         await stop(client_instance, user_id, frwd_id)
 
-# ... (Rest of regix.py functions remain unchanged) ...
 @Client.on_callback_query(filters.regex(r'^start_public'))
 async def pub_(bot, cb):
     user_id = cb.from_user.id
@@ -340,7 +335,6 @@ async def restore_progress_cb(bot, query):
     if not sts.verify():
         return await query.answer("Task completed or invalid.", show_alert=True)
     
-    # Retrieve stored names if available, or just use IDs
     task_info = temp.ACTIVE_TASKS.get(query.from_user.id, {}).get(task_id, {}).get("details", {})
     extra_info = {
         'from': task_info.get('from', 'Unknown'),
@@ -390,7 +384,6 @@ async def edit_progress(msg, sts, status, extra_info=None):
         eta = sts.get_readable_time(int((i.total - i.fetched) / speed if speed > 0 else 0))
         percentage = "{:.2f}".format(i.fetched * 100 / i.total if i.total > 0 else 0.00)
         
-        # New Modern UI
         progress_bar = "▰{0}▱{1}".format('▰' * math.floor(float(percentage) / 10), '▱' * (10 - math.floor(float(percentage) / 10)))
         
         text = (f"<b>🚀 Forwarding Task</b>\n"
@@ -413,17 +406,26 @@ async def edit_progress(msg, sts, status, extra_info=None):
     else:
         end_time = time.time(); time_taken = sts.get_readable_time(int(end_time - i.start))
         total_skipped = i.deleted + i.duplicate + i.filtered
+        diff = end_time - i.start
+        if diff == 0: diff = 1
+        speed = i.fetched / diff
         
-        title = "✅ <b>Forwarding Complete</b>" if status == "completed" else f"❌ <b>Task {status.title()}</b>"
-        line = "━━━━━━━━━━━━━━━━━━━━"
-        text = (f"{title}\n{line}\n"
-                f"<b>Time Taken:</b> <code>{time_taken}</code>\n\n"
-                f"<b><u>Statistics</u></b>:\n"
-                f"  Processed: <code>{i.fetched}</code>\n"
-                f"  Forwarded: <code>{i.total_files}</code>\n"
-                f"  Skipped:   <code>{total_skipped}</code>\n"
-                f"  Failed:    <code>{i.failed}</code>")
-        button = InlineKeyboardMarkup([[InlineKeyboardButton("Done!", callback_data="close_btn")]])
+        icon = "✅" if status == "completed" else "❌"
+        title = f"{icon} <b>Task {status.title()}</b>"
+        
+        # Modern Completion Card
+        text = (f"{title}\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"⏱ <b>Time Taken:</b> {time_taken}\n"
+                f"🚀 <b>Speed:</b> {speed:.1f} msgs/s\n\n"
+                f"📊 <b>Statistics</b>\n"
+                f"├ 📂 <b>Processed:</b> {i.fetched}\n"
+                f"├ ✅ <b>Forwarded:</b> {i.total_files}\n"
+                f"├ 🚫 <b>Failed:</b> {i.failed}\n"
+                f"└ ⏭ <b>Skipped:</b> {total_skipped}\n\n"
+                f"📝 <b>Task ID:</b> <code>{i.id[:8]}...</code>")
+        
+        button = InlineKeyboardMarkup([[InlineKeyboardButton("Done", callback_data="close_btn")]])
     await msg_edit(msg, text, button)
 
 async def stop(client, user_id, task_id):

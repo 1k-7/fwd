@@ -1,11 +1,11 @@
-# mistaldrin/fwd/fwd-DawnUltra/plugins/public.py
+# plugins/public.py
 
 import re
 import asyncio
 import logging
 import random
 from uuid import uuid4
-from .utils import STS, start_range_selection, update_range_message
+from .utils import STS, start_range_selection, update_range_message, edit_or_reply
 from database import db
 from config import temp
 from translation import Translation
@@ -31,7 +31,6 @@ def parse_message_input(message):
             return chat_id, msg_id, "id_scan"
 
         # Check for custom chat:// scheme
-        # Matches chat://username or chat://123456
         chat_scheme_match = re.search(r"chat://@?([\w\d_]+)", message.text)
         if chat_scheme_match:
              return chat_scheme_match.group(1), None, "id_scan"
@@ -72,34 +71,27 @@ async def run(bot, message):
 async def cb_select_bot(bot, query):
     bot_id = int(query.data.split('_')[-1])
     temp.FORWARD_BOT_ID[query.from_user.id] = bot_id
-    await query.message.delete()
+    # Instead of delete, pass query.message to edit
     await prompt_target_channel(bot, query.message)
 
 async def prompt_target_channel(bot, message):
     user_id = message.chat.id
     channels = await db.get_user_channels(user_id)
-    # Allow proceeding even if no channels, so user can select PM Target
     
     # Build Channel Buttons
     chan_btns = [InlineKeyboardButton(c['title'], callback_data=f"fwd_target_{c['chat_id']}") for c in channels]
-    
-    # Add PM Target Button
     chan_btns.append(InlineKeyboardButton("👤 PM Target", callback_data="fwd_target_pm"))
     
-    # Layout Logic
-    # 2 columns. If total (including PM) is odd, last one is full width.
     grid = []
     if len(chan_btns) % 2 == 1:
-        # Odd: Pairs + Last Full
         grid = [chan_btns[i:i+2] for i in range(0, len(chan_btns)-1, 2)]
         grid.append([chan_btns[-1]])
     else:
-        # Even: All Pairs
         grid = [chan_btns[i:i+2] for i in range(0, len(chan_btns), 2)]
         
     grid.append([InlineKeyboardButton("« Cancel", callback_data="close_btn")])
     
-    await message.reply(Translation.TO_MSG, reply_markup=InlineKeyboardMarkup(grid))
+    await edit_or_reply(message, Translation.TO_MSG, reply_markup=InlineKeyboardMarkup(grid))
 
 @Client.on_callback_query(filters.regex(r'^fwd_target_'))
 async def cb_select_target(bot, query):
@@ -144,51 +136,44 @@ async def stateful_message_handler(bot: Client, message: Message):
     try: await message.delete()
     except: pass
     
-    # --- RETRY LOGIC: DO NOT POP STATE YET ---
-
     if current_state == "awaiting_pm_target":
         target_input = message.text
         resolved_chat_id = None
         target_name = "PM Target"
 
-        # Try resolving input
         try:
             bot_id = temp.FORWARD_BOT_ID.get(user_id)
             if not bot_id: return await bot.send_message(user_id, "Bot selection lost. Please restart.")
             
             _bot_data = await db.get_bot(user_id, bot_id)
             async with CLIENT().client(_bot_data) as client_instance:
-                # Handle Forward
                 if message.forward_from:
                     chat = message.forward_from
                 elif message.forward_from_chat:
                     chat = message.forward_from_chat
                 else:
-                    # Handle Text Input (Username/ID)
                     try:
                         if target_input.lstrip('-').isdigit():
                             target_input = int(target_input)
                         chat = await client_instance.get_chat(target_input)
                     except Exception:
                         await bot.send_message(user_id, "❌ Invalid user/chat. Please try again.")
-                        return # Retry
+                        return 
 
                 resolved_chat_id = chat.id
                 target_name = chat.title or chat.first_name
 
-            # Success
             prompt_message = await bot.send_message(user_id, Translation.FROM_MSG)
-            # Update state to next step
             temp.USER_STATES[user_id] = {
                 "state": "awaiting_source", 
                 "to_chat_id": resolved_chat_id, 
                 "prompt_message_id": prompt_message.id
             }
-            return # State updated, don't pop
+            return
 
         except Exception as e:
             await bot.send_message(user_id, f"❌ Error resolving target: {e}\nTry again.")
-            return # Retry
+            return
 
     elif current_state == "awaiting_source":
         to_chat_id = state_info["to_chat_id"]
@@ -198,22 +183,19 @@ async def stateful_message_handler(bot: Client, message: Message):
         mode = "standard"
         if info == "id_scan":
             mode = "id_scan"
-            # Chat ID Validation for chat://
             if isinstance(from_chat_id, str) and from_chat_id.isdigit():
                  from_chat_id = int(from_chat_id)
             
-            # --- Check Bot vs Userbot for chat:// ---
             bot_id = temp.FORWARD_BOT_ID.get(user_id)
             _bot_data = await db.get_bot(user_id, bot_id) if bot_id else None
             
             if _bot_data and _bot_data.get('is_bot') and (isinstance(from_chat_id, str) or message.text.startswith("chat://")):
                  await bot.send_message(user_id, "❌ `chat://` source is only supported for **Userbots**.\nPlease provide a forwarded message or link.")
-                 return # Retry
-            # ----------------------------------------
+                 return
 
         elif info: 
              await bot.send_message(user_id, f"❌ {info}\nPlease try again.")
-             return # Retry
+             return 
         
         status_msg = await bot.send_message(user_id, "`Verifying Source...`")
         from_title = None
@@ -263,14 +245,11 @@ async def stateful_message_handler(bot: Client, message: Message):
         except Exception as e:
             await status_msg.delete()
             await bot.send_message(user_id, f"❌ Error verifying source: `{e}`\nTry again.")
-            return # Retry
+            return
 
-        await status_msg.delete()
-        if not from_title: from_title = f"Chat: {from_chat_id}"
-        
-        # Success - Clear state now
+        # Instead of deleting status_msg, we pass it to be edited by start_range_selection
         temp.USER_STATES.pop(user_id, None)
-        await start_range_selection(bot, message, from_chat_id, from_title, to_chat_id, 1, end_id, mode=mode)
+        await start_range_selection(bot, status_msg, from_chat_id, from_title, to_chat_id, 1, end_id, mode=mode)
 
     elif current_state == "awaiting_range_edit":
         session_id, value_type = state_info.get("session_id"), state_info.get("value_type")
@@ -282,15 +261,15 @@ async def stateful_message_handler(bot: Client, message: Message):
         if message.text and message.text.isdigit():
             session[f'{value_type}_id'] = int(message.text)
             await update_range_message(bot, session_id)
-            temp.USER_STATES.pop(user_id, None) # Success
+            temp.USER_STATES.pop(user_id, None)
         else:
             await bot.send_message(user_id, "❌ Invalid ID. Please send a number.")
-            return # Retry
+            return
 
     elif current_state == "awaiting_channel_forward":
         if not message.forward_date: 
             await bot.send_message(user_id, "❌ Not a forwarded message.\nPlease forward a message from the target channel.")
-            return # Retry
+            return
         
         chat_id, title = message.forward_from_chat.id, message.forward_from_chat.title
         username = f"@{message.forward_from_chat.username}" if message.forward_from_chat.username else "private"
@@ -303,11 +282,6 @@ async def stateful_message_handler(bot: Client, message: Message):
         temp.USER_STATES.pop(user_id, None)
     
     elif current_state == "awaiting_bot_token":
-        # CLIENT methods need error handling wrappers for retries ideally, 
-        # but simpler to just call and if it fails, let user try again if logic allows.
-        # Here CLIENT().add_bot usually finishes the flow. 
-        # We'll rely on CLIENT to reply. If fail, state could be kept? 
-        # For now, let's just pop.
         await CLIENT().add_bot(bot, message)
         temp.USER_STATES.pop(user_id, None)
     
@@ -352,9 +326,6 @@ async def stateful_message_handler(bot: Client, message: Message):
             temp.USER_STATES.pop(user_id, None)
             return await bot.send_message(user_id, "Error: Userbot selection lost.")
         
-        # Retry logic handled inside process? No, process starts range selection.
-        # If process fails, user has to start over currently.
-        # Implementing deep retry here is complex, so we pass.
         await process_unequify_target(bot, message, user_id, userbot_id, message.text)
         temp.USER_STATES.pop(user_id, None)
 
@@ -363,7 +334,7 @@ async def stateful_message_handler(bot: Client, message: Message):
         selected_chat = chats.get(user_input)
         if not selected_chat: 
             await bot.send_message(user_id, "❌ Invalid selection. Try again.")
-            return # Retry
+            return 
         
         userbot_id = temp.UNEQUIFY_USERBOT_ID.get(user_id)
         if not userbot_id: 
@@ -399,19 +370,18 @@ async def range_selection_callbacks(bot, query):
             "prompt_message_id": prompt.id
         }
     elif action == "confirm":
-        await query.message.delete()
+        # Pass the message to be edited directly if possible
         final_callback = session.get('final_callback')
-        if final_callback == 'fwd_final': await show_final_confirmation(bot, session_id)
+        if final_callback == 'fwd_final': await show_final_confirmation(bot, session_id, query.message)
         elif final_callback == 'uneq_final': from plugins.unequify import prompt_type_selection; await prompt_type_selection(bot, query, session_id)
 
-async def show_final_confirmation(bot, session_id):
+async def show_final_confirmation(bot, session_id, message_to_edit=None):
     session = temp.RANGE_SESSIONS.get(session_id)
     if not session: return
     user_id, bot_id = session['user_id'], temp.FORWARD_BOT_ID.get(session['user_id'])
     if not bot_id: return await bot.send_message(user_id, "Error: Bot selection lost.")
     _bot, channels = await db.get_bot(user_id, bot_id), await db.get_user_channels(user_id)
     
-    # Resolve title locally for PM targets if not in channel list
     to_title = "Unknown"
     for c in channels:
         if c['chat_id'] == session['to_chat_id']:
@@ -425,14 +395,21 @@ async def show_final_confirmation(bot, session_id):
     sts = STS(forward_id).store(From=session['from_chat_id'], to=session['to_chat_id'], start_id=session['start_id'], end_id=session['end_id'])
     sts.data[forward_id]['mode'] = session.get('mode', 'standard')
     
-    await bot.send_message(user_id, Translation.DOUBLE_CHECK.format(
+    text = Translation.DOUBLE_CHECK.format(
             botname=_bot.get('name', 'N/A'), botuname=_bot.get('username', ''),
-            from_chat=session['from_title'], to_chat=to_title, message_range=message_range_text),
-        disable_web_page_preview=True,
-        reply_markup=InlineKeyboardMarkup([
+            from_chat=session['from_title'], to_chat=to_title, message_range=message_range_text)
+    
+    markup = InlineKeyboardMarkup([
             [InlineKeyboardButton('✓ Yes, Start Forwarding', callback_data=f"start_public_{forward_id}")],
             [InlineKeyboardButton('« No, Cancel', callback_data="close_btn")]
-        ]))
+        ])
+
+    if message_to_edit:
+        try: await message_to_edit.edit_text(text, reply_markup=markup, disable_web_page_preview=True)
+        except: await bot.send_message(user_id, text, reply_markup=markup, disable_web_page_preview=True)
+    else:
+        await bot.send_message(user_id, text, reply_markup=markup, disable_web_page_preview=True)
+        
     temp.RANGE_SESSIONS.pop(session_id, None)
 
 @Client.on_callback_query(filters.regex(r'^close_btn$'))

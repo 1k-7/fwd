@@ -1,4 +1,4 @@
-# mistaldrin/fwd/fwd-DawnUltra/plugins/utils.py
+# plugins/utils.py
 
 import re
 import random
@@ -9,7 +9,7 @@ from uuid import uuid4
 from database import db
 from config import temp
 from translation import Translation
-from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
+from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message, InputMediaPhoto
 from pyrogram.errors import MessageNotModified
 from PIL import Image
 
@@ -17,7 +17,6 @@ STATUS = {}
 ZEN = ["https://files.catbox.moe/3lwlbm.png"]
 logger = logging.getLogger(__name__)
 
-# Moved from test.py to avoid circular imports
 BTN_URL_REGEX = re.compile(r"(\[([^\[]+?)]\[buttonurl:/{0,2}(.+?)(:same)?])")
 
 def parse_buttons(text, markup=True):
@@ -101,6 +100,17 @@ async def format_thumbnail(path):
         logger.error(f"Thumbnail formatting failed: {e}")
         return path # Return original if processing fails
 
+async def edit_or_reply(message, text, reply_markup=None, parse_mode=None):
+    """Attempts to edit the message; falls back to reply if not possible."""
+    try:
+        await message.edit_text(text, reply_markup=reply_markup, parse_mode=parse_mode, disable_web_page_preview=True)
+    except Exception:
+        # If edit fails (e.g. message too old, different media type), try to delete and send new
+        try:
+             await message.delete()
+        except: pass
+        return await message.reply(text, reply_markup=reply_markup, parse_mode=parse_mode, disable_web_page_preview=True)
+
 class STS:
     def __init__(self, id):
         self.id = id
@@ -156,7 +166,6 @@ class STS:
         configs = await db.get_configs(user_id)
         filters = await db.get_filters(user_id)
         
-        # Use the locally defined parse_buttons
         button = parse_buttons(configs.get('button', ''))
         
         return bot, configs.get('caption'), configs.get('forward_tag', False), {
@@ -181,7 +190,7 @@ async def start_range_selection(bot, message: Message, from_chat_id, from_title,
         'message_id': None,
         'mode': mode 
     }
-    await update_range_message(bot, session_id)
+    await update_range_message(bot, session_id, message_to_edit=message)
 
 async def update_range_message(bot, session_id, message_to_edit=None):
     session = temp.RANGE_SESSIONS.get(session_id)
@@ -203,25 +212,33 @@ async def update_range_message(bot, session_id, message_to_edit=None):
         [InlineKeyboardButton("« Cancel", callback_data=f"range_cancel_{session_id}")]]
     
     reply_markup = InlineKeyboardMarkup(buttons)
-    message_id_to_edit = message_to_edit.id if message_to_edit else session.get('message_id')
+    
+    # Try to reuse the passed message or the stored message ID
+    target_msg = message_to_edit or (session.get('message_id'))
     
     try:
-        if message_id_to_edit:
-            new_message = await bot.edit_message_text(
-                chat_id=session['chat_id'], message_id=message_id_to_edit,
+        if isinstance(target_msg, Message):
+             new_message = await target_msg.edit_text(text, reply_markup=reply_markup)
+             session['message_id'] = new_message.id
+        elif isinstance(target_msg, int):
+             new_message = await bot.edit_message_text(
+                chat_id=session['chat_id'], message_id=target_msg,
                 text=text, reply_markup=reply_markup)
         else:
-            new_message = await bot.send_message(
-                chat_id=session['chat_id'], text=text, reply_markup=reply_markup,
-                reply_to_message_id=session['original_message_id'])
-        session['message_id'] = new_message.id
-    except MessageNotModified: pass
-    except Exception as e:
-        logger.error(f"Error editing range message, sending new one: {e}", exc_info=False)
-        try:
+            # Fallback for fresh message
             new_message = await bot.send_message(
                 chat_id=session['chat_id'], text=text, reply_markup=reply_markup,
                 reply_to_message_id=session['original_message_id'])
             session['message_id'] = new_message.id
-        except Exception as ie:
-            logger.error(f"Failed to send fallback range message: {ie}")
+    except MessageNotModified: pass
+    except Exception as e:
+        # If edit fails (e.g. content issue), delete and resend
+        try:
+             if isinstance(target_msg, Message): await target_msg.delete()
+             elif isinstance(target_msg, int): await bot.delete_messages(session['chat_id'], target_msg)
+        except: pass
+        
+        new_message = await bot.send_message(
+            chat_id=session['chat_id'], text=text, reply_markup=reply_markup,
+            reply_to_message_id=session['original_message_id'])
+        session['message_id'] = new_message.id
