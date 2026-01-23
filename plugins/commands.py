@@ -10,7 +10,7 @@ from pyrogram import Client, filters, enums, __version__ as pyrogram_version
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, InputMediaDocument, Message, CallbackQuery
 from .test import update_configs, CLIENT
 
-SYD = ["https://files.catbox.moe/3lwlbm.png"]
+ZEN = ["https://files.catbox.moe/3lwlbm.png"]
 
 main_buttons = [[
         InlineKeyboardButton('Help', callback_data='help'),
@@ -31,7 +31,7 @@ async def start(client, message):
     reply_markup = InlineKeyboardMarkup(main_buttons)
     text=Translation.START_TXT.format(user.mention)
     await message.reply_photo(
-        photo=random.choice(SYD),
+        photo=random.choice(ZEN),
         caption=text,
         reply_markup=reply_markup
     )
@@ -82,7 +82,7 @@ async def restart(client, message):
     os.execl(sys.executable, sys.executable, *sys.argv)
     
 @Client.on_message(filters.command("start") & filters.chat(-1002687879857))
-async def sydstart(client, message):
+async def zenstart(client, message):
     await message.reply_text(".")
 
 #==================Callback Functions==================#

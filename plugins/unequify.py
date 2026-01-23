@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 # --- Constants for the interactive menu ---
 OPTION_LABELS = ["Text", "Photos/Videos", "Audio", "Documents", "Stickers"]
 DEFAULT_STATE = "01010"
-SYD = ["https://files.catbox.moe/3lwlbm.png"]
+ZEN = ["https://files.catbox.moe/3lwlbm.png"]
 
 
 def create_selection_keyboard(selection_state: str, session_id: str) -> InlineKeyboardMarkup:
@@ -48,7 +48,7 @@ async def prompt_type_selection(bot, query, session_id):
     keyboard = create_selection_keyboard(DEFAULT_STATE, session_id)
     await bot.send_photo(
         chat_id=chat_id,
-        photo=random.choice(SYD),
+        photo=random.choice(ZEN),
         caption="<b>Select Message Types</b>\n\nSelect the types of messages to find duplicates of.",
         reply_markup=keyboard
     )
@@ -83,7 +83,7 @@ async def unequify_start(bot: Client, message: Message):
     if len(userbots) > 1:
         buttons = [[InlineKeyboardButton(ub['name'], callback_data=f"uneq_select_ub_{ub['id']}")] for ub in userbots]
         buttons.append([InlineKeyboardButton("« Cancel", callback_data="close_btn")])
-        await message.reply_photo(photo=random.choice(SYD), caption="<b>Select a Userbot</b>", reply_markup=InlineKeyboardMarkup(buttons))
+        await message.reply_photo(photo=random.choice(ZEN), caption="<b>Select a Userbot</b>", reply_markup=InlineKeyboardMarkup(buttons))
         return
 
     # If only one userbot, select it automatically and proceed
@@ -139,7 +139,7 @@ async def unequify_continue(bot: Client, message: Message):
         [InlineKeyboardButton("Manual Input", callback_data="uneq_manual")],
         [InlineKeyboardButton("Select from Userbot Chats", callback_data="uneq_select_from_ub")]
     ]
-    await message.reply_photo(photo=random.choice(SYD), caption=Translation.UNEQUIFY_START_TXT, reply_markup=InlineKeyboardMarkup(buttons))
+    await message.reply_photo(photo=random.choice(ZEN), caption=Translation.UNEQUIFY_START_TXT, reply_markup=InlineKeyboardMarkup(buttons))
 
 
 @Client.on_callback_query(filters.regex("^uneq_"))

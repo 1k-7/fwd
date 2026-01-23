@@ -11,7 +11,7 @@ from .utils import parse_buttons
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 CLIENT = CLIENT()
-SYD = ["https://files.catbox.moe/3lwlbm.png"]
+ZEN = ["https://files.catbox.moe/3lwlbm.png"]
 logger = logging.getLogger(__name__)
 
 
@@ -27,7 +27,7 @@ async def settings(client, message):
 
     text="<b>֎ Settings ֎</b>\n\nManage personal configurations."
     await message.reply_photo(
-        photo=random.choice(SYD),
+        photo=random.choice(ZEN),
         caption=text,
         reply_markup=main_buttons(),
         quote=True

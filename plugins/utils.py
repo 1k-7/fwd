@@ -14,7 +14,7 @@ from pyrogram.errors import MessageNotModified
 from PIL import Image
 
 STATUS = {}
-SYD = ["https://files.catbox.moe/3lwlbm.png"]
+ZEN = ["https://files.catbox.moe/3lwlbm.png"]
 logger = logging.getLogger(__name__)
 
 # Moved from test.py to avoid circular imports
