@@ -4,3 +4,4 @@ TgCrypto
 Dnspython
 aiohttp
 pytz
+pillow

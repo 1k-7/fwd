@@ -6,7 +6,7 @@ import asyncio
 import logging
 import math
 import time
-from .utils import STS
+from .utils import STS, format_thumbnail
 from database import db
 from .test import CLIENT, start_clone_bot
 from config import Config, temp
@@ -42,21 +42,27 @@ async def run_forwarding_task(bot, user_id, frwd_id, bot_id, sts, message_obj):
         thumb_id = data_params.get('thumbnail')
         if thumb_id:
             try:
-                # Use the main bot to download the thumbnail to a temp path
-                thumb_path = await bot.download_media(thumb_id, file_name=f"thumb_{frwd_id}.jpg")
+                # 1. Download raw thumb
+                raw_thumb = await bot.download_media(thumb_id, file_name=f"raw_thumb_{frwd_id}")
+                
+                # 2. Format it (Resize, Crop, JPEG, <200KB)
+                if raw_thumb:
+                    thumb_path = await format_thumbnail(raw_thumb)
+                    if thumb_path != raw_thumb and os.path.exists(raw_thumb):
+                        os.remove(raw_thumb) # Clean raw file
             except Exception as e:
-                logger.error(f"Failed to download thumbnail: {e}")
+                logger.error(f"Failed to prepare thumbnail: {e}")
                 # Continue without thumb if fail
         # -----------------------
 
         is_bot_mode = _bot_data.get('is_bot', False)
-        # Label adjustment based on thumbnail presence
-        if thumb_id and not is_bot_mode:
-            mode_label = "👤 Userbot (Custom Thumb Mode)"
+        # Label adjustment
+        if thumb_path:
+            mode_label = "Custom Thumb (Send By File ID)"
         elif is_bot_mode:
-            mode_label = "🤖 Bot (File ID Mode)"
+            mode_label = "Bot (File ID Mode)"
         else:
-            mode_label = "👤 Userbot (Direct Copy)"
+            mode_label = "Userbot (Direct Copy)"
 
         await msg_edit(message_obj, "Starting client...")
         client_instance = await start_clone_bot(CLIENT.client(_bot_data), _bot_data)
@@ -167,22 +173,24 @@ async def run_forwarding_task(bot, user_id, frwd_id, bot_id, sts, message_obj):
                 try:
                     capt = custom_caption(message, caption)
                     
-                    # Logic: If Bot OR (Userbot AND Thumb is set), use send_... methods.
-                    # Otherwise (Userbot AND No Thumb), use copy.
+                    # LOGIC:
+                    # 1. If Thumb exists: MUST use send_<media>(file_id) to apply thumb. (Both Bot and Userbot)
+                    # 2. If Bot (No Thumb): MUST use send_<media>(file_id) to bypass restrictions.
+                    # 3. If Userbot (No Thumb): Use copy_message (Best for structure/speed).
                     
-                    use_send_method = is_bot_mode or (thumb_path is not None)
+                    use_send_method = (thumb_path is not None) or is_bot_mode
 
-                    if use_send_method:
-                        if message.media:
-                            # Helper to prepare args
-                            send_args = {
-                                "chat_id": i.TO, 
-                                "caption": capt, 
-                                "reply_markup": button, 
-                                "protect_content": protect
-                            }
-                            if thumb_path: send_args['thumb'] = thumb_path
+                    if use_send_method and message.media:
+                        # Helper to prepare args
+                        send_args = {
+                            "chat_id": i.TO, 
+                            "caption": capt, 
+                            "reply_markup": button, 
+                            "protect_content": protect
+                        }
+                        if thumb_path: send_args['thumb'] = thumb_path
 
+                        try:
                             if message.photo:
                                 await client_instance.send_photo(photo=message.photo.file_id, **send_args)
                             elif message.video:
@@ -196,25 +204,32 @@ async def run_forwarding_task(bot, user_id, frwd_id, bot_id, sts, message_obj):
                             elif message.animation:
                                 await client_instance.send_animation(animation=message.animation.file_id, **send_args)
                             elif message.sticker:
-                                # Stickers usually don't have captions/thumbs in standard send
-                                try: await client_instance.send_sticker(chat_id=i.TO, sticker=message.sticker.file_id)
-                                except: pass 
+                                # Stickers cannot have custom thumbs usually
+                                await client_instance.send_sticker(chat_id=i.TO, sticker=message.sticker.file_id) 
                             elif message.video_note:
-                                try: await client_instance.send_video_note(chat_id=i.TO, video_note=message.video_note.file_id)
-                                except: pass
+                                await client_instance.send_video_note(chat_id=i.TO, video_note=message.video_note.file_id)
                             else:
-                                # Fallback
-                                try: await message.copy(i.TO, caption=capt, reply_markup=button, protect_content=protect)
-                                except: sts.add('failed'); continue
+                                # Fallback (polls, contacts, etc) -> Copy
+                                await message.copy(i.TO, caption=capt, reply_markup=button, protect_content=protect)
                             
                             sts.add('total_files')
+                        except Exception as e_send:
+                            # If send fails (e.g., file reference error for userbot), try copy as last resort
+                            # But ONLY if it wasn't a thumb error. 
+                            if thumb_path:
+                                logger.error(f"Send with thumb failed: {e_send}. Trying copy (thumb will be lost).")
+                                await message.copy(i.TO, caption=capt, reply_markup=button, protect_content=protect)
+                                sts.add('total_files')
+                            else:
+                                raise e_send
 
-                        elif message.text:
-                            await client_instance.send_message(i.TO, message.text.html, reply_markup=button, disable_web_page_preview=True, protect_content=protect)
-                            sts.add('total_files')
+                    elif message.text:
+                         # Text always send_message
+                         await client_instance.send_message(i.TO, message.text.html, reply_markup=button, disable_web_page_preview=True, protect_content=protect)
+                         sts.add('total_files')
 
                     else:
-                        # Direct Copy (Userbot No Thumb)
+                        # Userbot + No Thumb + Media -> Direct Copy
                         await message.copy(chat_id=i.TO, caption=capt, reply_markup=button, protect_content=protect)
                         sts.add('total_files')
                     
@@ -247,7 +262,7 @@ async def run_forwarding_task(bot, user_id, frwd_id, bot_id, sts, message_obj):
         await edit_progress(message_obj, sts, final_status, extra_info if 'extra_info' in locals() else None)
         await stop(client_instance, user_id, frwd_id)
 
-# ... (rest of the file remains same: pub_, resume_forwarding, restore_progress_cb, get_frwd_status, msg_edit, edit_progress, stop, custom_caption, get_size, retry_btn) ...
+# ... (Rest of regix.py functions: pub_, resume_forwarding, etc. remain unchanged) ...
 @Client.on_callback_query(filters.regex(r'^start_public'))
 async def pub_(bot, cb):
     user_id = cb.from_user.id
