@@ -1,3 +1,5 @@
+# mistaldrin/fwd/fwd-DawnUltra/plugins/public.py
+
 import re
 import asyncio
 import logging
@@ -26,13 +28,12 @@ def parse_message_input(message):
         if open_msg_match:
             chat_id = int(open_msg_match.group(1))
             msg_id = int(open_msg_match.group(2)) if open_msg_match.group(2) else None
-            # Return a special flag for mode
             return chat_id, msg_id, "id_scan"
 
         # Check for custom chat:// scheme
+        # Matches chat://username or chat://123456
         chat_scheme_match = re.search(r"chat://@?([\w\d_]+)", message.text)
         if chat_scheme_match:
-             # We return the username/id string. Resolution happens in state handler.
              return chat_scheme_match.group(1), None, "id_scan"
 
     if message.text and not message.forward_date:
@@ -77,17 +78,44 @@ async def cb_select_bot(bot, query):
 async def prompt_target_channel(bot, message):
     user_id = message.chat.id
     channels = await db.get_user_channels(user_id)
-    if not channels:
-       return await message.reply("Add a target channel first. ( >⁠.⁠< ) --> /settings")
-
-    buttons = [[InlineKeyboardButton(c['title'], callback_data=f"fwd_target_{c['chat_id']}")] for c in channels]
-    buttons.append([InlineKeyboardButton("« Cancel", callback_data="close_btn")])
-    await message.reply(Translation.TO_MSG, reply_markup=InlineKeyboardMarkup(buttons))
+    # Allow proceeding even if no channels, so user can select PM Target
+    
+    # Build Channel Buttons
+    chan_btns = [InlineKeyboardButton(c['title'], callback_data=f"fwd_target_{c['chat_id']}") for c in channels]
+    
+    # Add PM Target Button
+    chan_btns.append(InlineKeyboardButton("👤 PM Target", callback_data="fwd_target_pm"))
+    
+    # Layout Logic
+    # 2 columns. If total (including PM) is odd, last one is full width.
+    grid = []
+    if len(chan_btns) % 2 == 1:
+        # Odd: Pairs + Last Full
+        grid = [chan_btns[i:i+2] for i in range(0, len(chan_btns)-1, 2)]
+        grid.append([chan_btns[-1]])
+    else:
+        # Even: All Pairs
+        grid = [chan_btns[i:i+2] for i in range(0, len(chan_btns), 2)]
+        
+    grid.append([InlineKeyboardButton("« Cancel", callback_data="close_btn")])
+    
+    await message.reply(Translation.TO_MSG, reply_markup=InlineKeyboardMarkup(grid))
 
 @Client.on_callback_query(filters.regex(r'^fwd_target_'))
 async def cb_select_target(bot, query):
     user_id = query.from_user.id
-    to_chat_id = int(query.data.split('_')[-1])
+    data = query.data
+    
+    if data == "fwd_target_pm":
+        prompt_message = await query.message.edit_text(
+            "<b>👤 PM Target</b>\n\n"
+            "Send the **Username**, **User ID**, **Profile Link**, or forward a message from the target user.\n\n"
+            "/cancel - to abort."
+        )
+        temp.USER_STATES[user_id] = {"state": "awaiting_pm_target", "prompt_message_id": prompt_message.id}
+        return
+
+    to_chat_id = int(data.split('_')[-1])
     
     prompt_message = await query.message.edit_text(Translation.FROM_MSG)
     temp.USER_STATES[user_id] = {"state": "awaiting_source", "to_chat_id": to_chat_id, "prompt_message_id": prompt_message.id}
@@ -116,20 +144,76 @@ async def stateful_message_handler(bot: Client, message: Message):
     try: await message.delete()
     except: pass
     
-    temp.USER_STATES.pop(user_id, None)
+    # --- RETRY LOGIC: DO NOT POP STATE YET ---
 
-    if current_state == "awaiting_source":
+    if current_state == "awaiting_pm_target":
+        target_input = message.text
+        resolved_chat_id = None
+        target_name = "PM Target"
+
+        # Try resolving input
+        try:
+            bot_id = temp.FORWARD_BOT_ID.get(user_id)
+            if not bot_id: return await bot.send_message(user_id, "Bot selection lost. Please restart.")
+            
+            _bot_data = await db.get_bot(user_id, bot_id)
+            async with CLIENT().client(_bot_data) as client_instance:
+                # Handle Forward
+                if message.forward_from:
+                    chat = message.forward_from
+                elif message.forward_from_chat:
+                    chat = message.forward_from_chat
+                else:
+                    # Handle Text Input (Username/ID)
+                    try:
+                        if target_input.lstrip('-').isdigit():
+                            target_input = int(target_input)
+                        chat = await client_instance.get_chat(target_input)
+                    except Exception:
+                        await bot.send_message(user_id, "❌ Invalid user/chat. Please try again.")
+                        return # Retry
+
+                resolved_chat_id = chat.id
+                target_name = chat.title or chat.first_name
+
+            # Success
+            prompt_message = await bot.send_message(user_id, Translation.FROM_MSG)
+            # Update state to next step
+            temp.USER_STATES[user_id] = {
+                "state": "awaiting_source", 
+                "to_chat_id": resolved_chat_id, 
+                "prompt_message_id": prompt_message.id
+            }
+            return # State updated, don't pop
+
+        except Exception as e:
+            await bot.send_message(user_id, f"❌ Error resolving target: {e}\nTry again.")
+            return # Retry
+
+    elif current_state == "awaiting_source":
         to_chat_id = state_info["to_chat_id"]
-        # parse_message_input now returns (chat_id, end_id, mode_flag/error)
         parsed_res = parse_message_input(message)
         from_chat_id, end_id, info = parsed_res
         
-        # Check if info is an error string or a mode flag
         mode = "standard"
         if info == "id_scan":
             mode = "id_scan"
-        elif info: # It's an error message
-             return await bot.send_message(user_id, info)
+            # Chat ID Validation for chat://
+            if isinstance(from_chat_id, str) and from_chat_id.isdigit():
+                 from_chat_id = int(from_chat_id)
+            
+            # --- Check Bot vs Userbot for chat:// ---
+            bot_id = temp.FORWARD_BOT_ID.get(user_id)
+            _bot_data = await db.get_bot(user_id, bot_id) if bot_id else None
+            
+            if _bot_data and _bot_data.get('is_bot') and (isinstance(from_chat_id, str) or message.text.startswith("chat://")):
+                 await bot.send_message(user_id, "❌ `chat://` source is only supported for **Userbots**.\nPlease provide a forwarded message or link.")
+                 return # Retry
+            # ----------------------------------------
+
+        elif info: 
+             await bot.send_message(user_id, f"❌ {info}\nPlease try again.")
+             return # Retry
         
         status_msg = await bot.send_message(user_id, "`Verifying Source...`")
         from_title = None
@@ -150,30 +234,25 @@ async def stateful_message_handler(bot: Client, message: Message):
                 try:
                     chat_info = await client_instance.get_chat(from_chat_id)
                 except PeerIdInvalid:
-                    # Fallback scan for invalid peers
                     async for dialog in client_instance.get_dialogs(limit=500):
                         if (isinstance(from_chat_id, int) and dialog.chat.id == from_chat_id) or \
                            (isinstance(from_chat_id, str) and dialog.chat.username and dialog.chat.username.lower() == from_chat_id.lower()):
                             chat_info = dialog.chat
-                            from_chat_id = dialog.chat.id # Ensure we have the ID now
+                            from_chat_id = dialog.chat.id
                             break
                     if not chat_info:
-                         raise ValueError("Peer not found in userbot dialogs (checked last 500).")
+                         raise ValueError("Peer not found in dialogs.")
                 except Exception as e:
-                     # Attempt to resolve username if it's a string
                      if isinstance(from_chat_id, str):
                          try:
                              chat_info = await client_instance.get_chat(from_chat_id)
                              from_chat_id = chat_info.id
-                         except Exception as ie:
-                             raise ValueError(f"Could not resolve username: {ie}")
+                         except: raise ValueError(f"Could not resolve: {e}")
                      else:
-                        raise ValueError(f"Could not access chat/user: {e}")
+                        raise ValueError(f"Could not access chat: {e}")
 
                 from_title = chat_info.title or f"{chat_info.first_name} {chat_info.last_name or ''}".strip()
                 
-                # If mode is id_scan, we generally want ALL messages if end_id isn't specified,
-                # or up to the specified end_id. 
                 if end_id is None:
                     async for msg in client_instance.get_chat_history(from_chat_id, limit=1):
                         end_id = msg.id
@@ -183,64 +262,116 @@ async def stateful_message_handler(bot: Client, message: Message):
         
         except Exception as e:
             await status_msg.delete()
-            return await bot.send_message(user_id, f"Error verifying source: `{e}`")
+            await bot.send_message(user_id, f"❌ Error verifying source: `{e}`\nTry again.")
+            return # Retry
 
         await status_msg.delete()
         if not from_title: from_title = f"Chat: {from_chat_id}"
         
-        # Save the mode in the session for later retrieval
+        # Success - Clear state now
+        temp.USER_STATES.pop(user_id, None)
         await start_range_selection(bot, message, from_chat_id, from_title, to_chat_id, 1, end_id, mode=mode)
 
     elif current_state == "awaiting_range_edit":
         session_id, value_type = state_info.get("session_id"), state_info.get("value_type")
         session = temp.RANGE_SESSIONS.get(session_id)
-        if not session: return await bot.send_message(user_id, "Your session has expired. Please start over.")
+        if not session: 
+            temp.USER_STATES.pop(user_id, None)
+            return await bot.send_message(user_id, "Your session has expired. Please start over.")
+        
         if message.text and message.text.isdigit():
             session[f'{value_type}_id'] = int(message.text)
             await update_range_message(bot, session_id)
+            temp.USER_STATES.pop(user_id, None) # Success
         else:
-            await bot.send_message(user_id, "Invalid ID provided. The process has been cancelled.")
-            temp.RANGE_SESSIONS.pop(session_id, None)
+            await bot.send_message(user_id, "❌ Invalid ID. Please send a number.")
+            return # Retry
 
     elif current_state == "awaiting_channel_forward":
-        if not message.forward_date: return await bot.send_message(user_id, "Not a forwarded message. (・_・;)\nProcess cancelled.")
+        if not message.forward_date: 
+            await bot.send_message(user_id, "❌ Not a forwarded message.\nPlease forward a message from the target channel.")
+            return # Retry
+        
         chat_id, title = message.forward_from_chat.id, message.forward_from_chat.title
         username = f"@{message.forward_from_chat.username}" if message.forward_from_chat.username else "private"
-        if await db.in_channel(user_id, chat_id): await bot.send_message(user_id, "This channel has already been added.")
-        else: await db.add_channel(user_id, chat_id, title, username); await bot.send_message(user_id, "Channel added. ✓")
+        
+        if await db.in_channel(user_id, chat_id): 
+            await bot.send_message(user_id, "This channel has already been added.")
+        else: 
+            await db.add_channel(user_id, chat_id, title, username)
+            await bot.send_message(user_id, "Channel added. ✓")
+        temp.USER_STATES.pop(user_id, None)
     
     elif current_state == "awaiting_bot_token":
+        # CLIENT methods need error handling wrappers for retries ideally, 
+        # but simpler to just call and if it fails, let user try again if logic allows.
+        # Here CLIENT().add_bot usually finishes the flow. 
+        # We'll rely on CLIENT to reply. If fail, state could be kept? 
+        # For now, let's just pop.
         await CLIENT().add_bot(bot, message)
+        temp.USER_STATES.pop(user_id, None)
     
     elif current_state == "awaiting_user_session":
         await CLIENT().add_session(bot, message)
+        temp.USER_STATES.pop(user_id, None)
 
     elif current_state and current_state.startswith("awaiting_setting_"):
         setting_key = current_state.split("awaiting_setting_")[1]
         value = None
-        if message.text.lower() == "/reset": value = None
+        
+        if message.text and message.text.lower() == "/reset": 
+            value = None
         elif setting_key == "file_size":
             try: value = float(message.text) * 1024 * 1024
-            except ValueError: return await bot.send_message(user_id, "Invalid number for file size.")
+            except ValueError: 
+                await bot.send_message(user_id, "❌ Invalid number. Try again.")
+                return
         elif setting_key == "size_limit":
-            if message.text.lower() not in ["above", "below"]: return await bot.send_message(user_id, "Invalid option. Please enter 'above' or 'below'.")
+            if message.text.lower() not in ["above", "below"]: 
+                await bot.send_message(user_id, "❌ Invalid option. Enter 'above' or 'below'.")
+                return
             value = message.text.lower()
-        else: value = message.text
+        elif setting_key == "thumbnail":
+            if message.photo:
+                value = message.photo.file_id
+            elif message.document and message.document.mime_type.startswith("image/"):
+                value = message.document.file_id
+            else:
+                await bot.send_message(user_id, "❌ Invalid media. Send a Photo or an Image Document.")
+                return
+        else: 
+            value = message.text
+
         await update_configs(user_id, setting_key, value)
         await bot.send_message(user_id, f"✅ **{setting_key.replace('_', ' ').title()}** has been updated.")
+        temp.USER_STATES.pop(user_id, None)
 
     elif current_state == "awaiting_unequify_manual_target":
         userbot_id = temp.UNEQUIFY_USERBOT_ID.get(user_id)
-        if not userbot_id: return await bot.send_message(user_id, "Error: Userbot selection lost. Please start over.")
+        if not userbot_id: 
+            temp.USER_STATES.pop(user_id, None)
+            return await bot.send_message(user_id, "Error: Userbot selection lost.")
+        
+        # Retry logic handled inside process? No, process starts range selection.
+        # If process fails, user has to start over currently.
+        # Implementing deep retry here is complex, so we pass.
         await process_unequify_target(bot, message, user_id, userbot_id, message.text)
+        temp.USER_STATES.pop(user_id, None)
 
     elif current_state == "awaiting_unequify_chat_selection":
         chats, user_input = state_info.get("chats", {}), message.text.strip()
         selected_chat = chats.get(user_input)
-        if not selected_chat: return await bot.send_message(user_id, "Invalid selection. Please start the /unequify process again.")
+        if not selected_chat: 
+            await bot.send_message(user_id, "❌ Invalid selection. Try again.")
+            return # Retry
+        
         userbot_id = temp.UNEQUIFY_USERBOT_ID.get(user_id)
-        if not userbot_id: return await bot.send_message(user_id, "Error: Userbot selection lost. Please start over.")
+        if not userbot_id: 
+            temp.USER_STATES.pop(user_id, None)
+            return await bot.send_message(user_id, "Error: Userbot selection lost.")
+            
         await process_unequify_target(bot, message, user_id, userbot_id, selected_chat.id)
+        temp.USER_STATES.pop(user_id, None)
 
 @Client.on_callback_query(filters.regex(r"^range_"))
 async def range_selection_callbacks(bot, query):
@@ -279,12 +410,19 @@ async def show_final_confirmation(bot, session_id):
     user_id, bot_id = session['user_id'], temp.FORWARD_BOT_ID.get(session['user_id'])
     if not bot_id: return await bot.send_message(user_id, "Error: Bot selection lost.")
     _bot, channels = await db.get_bot(user_id, bot_id), await db.get_user_channels(user_id)
-    to_title = next((c['title'] for c in channels if c['chat_id'] == session['to_chat_id']), 'Unknown')
+    
+    # Resolve title locally for PM targets if not in channel list
+    to_title = "Unknown"
+    for c in channels:
+        if c['chat_id'] == session['to_chat_id']:
+            to_title = c['title']
+            break
+    if to_title == "Unknown": to_title = f"ID: {session['to_chat_id']}"
+
     message_range_text = f"{min(session['start_id'], session['end_id'])} to {max(session['start_id'], session['end_id'])}"
     forward_id = str(uuid4())
     
     sts = STS(forward_id).store(From=session['from_chat_id'], to=session['to_chat_id'], start_id=session['start_id'], end_id=session['end_id'])
-    # Inject the scan mode into STS data
     sts.data[forward_id]['mode'] = session.get('mode', 'standard')
     
     await bot.send_message(user_id, Translation.DOUBLE_CHECK.format(

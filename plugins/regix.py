@@ -1,6 +1,7 @@
 # mistaldrin/fwd/fwd-DawnUltra/plugins/regix.py
 
 import re
+import os
 import asyncio
 import logging
 import math
@@ -27,6 +28,8 @@ async def run_forwarding_task(bot, user_id, frwd_id, bot_id, sts, message_obj):
     temp.forwardings += 1
     
     client_instance = None
+    thumb_path = None
+
     try:
         _bot_data, caption, forward_tag, data_params, protect, button = await sts.get_data(user_id, bot_id=bot_id)
         if not _bot_data:
@@ -35,9 +38,25 @@ async def run_forwarding_task(bot, user_id, frwd_id, bot_id, sts, message_obj):
         delay = data_params.get('forward_delay', 0.5)
         filters_to_apply = data_params.get('filters', [])
         
-        # Determine mode for UI
+        # --- THUMBNAIL SETUP ---
+        thumb_id = data_params.get('thumbnail')
+        if thumb_id:
+            try:
+                # Use the main bot to download the thumbnail to a temp path
+                thumb_path = await bot.download_media(thumb_id, file_name=f"thumb_{frwd_id}.jpg")
+            except Exception as e:
+                logger.error(f"Failed to download thumbnail: {e}")
+                # Continue without thumb if fail
+        # -----------------------
+
         is_bot_mode = _bot_data.get('is_bot', False)
-        mode_label = "🤖 Bot (File ID Mode)" if is_bot_mode else "👤 Userbot (Direct Copy)"
+        # Label adjustment based on thumbnail presence
+        if thumb_id and not is_bot_mode:
+            mode_label = "👤 Userbot (Custom Thumb Mode)"
+        elif is_bot_mode:
+            mode_label = "🤖 Bot (File ID Mode)"
+        else:
+            mode_label = "👤 Userbot (Direct Copy)"
 
         await msg_edit(message_obj, "Starting client...")
         client_instance = await start_clone_bot(CLIENT.client(_bot_data), _bot_data)
@@ -54,7 +73,6 @@ async def run_forwarding_task(bot, user_id, frwd_id, bot_id, sts, message_obj):
                         return dialog.chat
                 raise ValueError(f"Peer {chat_id} not found in recent dialogs. Please interact with it first.")
             except Exception as e:
-                # Retry if username
                  if isinstance(chat_id, str):
                      try: return await client_instance.get_chat(chat_id)
                      except: pass
@@ -67,6 +85,7 @@ async def run_forwarding_task(bot, user_id, frwd_id, bot_id, sts, message_obj):
             logger.error(f"Failed to resolve peers for task {frwd_id}: {e}")
             await msg_edit(message_obj, f"<b>Connection Error:</b>\n`{e}`\n\nTask stopped.")
             await stop(client_instance, user_id, frwd_id)
+            if thumb_path and os.path.exists(thumb_path): os.remove(thumb_path)
             return
         
         from_title = from_chat_details.title or f"{from_chat_details.first_name} {from_chat_details.last_name or ''}".strip()
@@ -77,26 +96,22 @@ async def run_forwarding_task(bot, user_id, frwd_id, bot_id, sts, message_obj):
         
         final_status = "error"
         last_update_time = time.time()
-
-        # Pass extra info for the revamped UI
         extra_info = {'mode': mode_label, 'from': from_title, 'to': to_title}
         await edit_progress(message_obj, sts, "running", extra_info)
         
         start_id = min(i.start_id, i.end_id)
         end_id = max(i.start_id, i.end_id)
         
-        # --- MODE SELECTION ---
         task_mode = sts.data[frwd_id].get('mode', 'standard')
         message_ids_to_process = []
         
         if task_mode == "id_scan":
-             await msg_edit(message_obj, "Scanning chat history for valid messages... (This may take a moment)")
+             await msg_edit(message_obj, "Scanning chat history... (This may take a moment)")
              try:
                  valid_ids = []
                  async for m in client_instance.get_chat_history(i.FROM):
                      if start_id <= m.id <= end_id:
                          valid_ids.append(m.id)
-                 
                  valid_ids.sort()
                  message_ids_to_process = valid_ids
                  sts.data[frwd_id]['total'] = len(valid_ids) 
@@ -104,12 +119,11 @@ async def run_forwarding_task(bot, user_id, frwd_id, bot_id, sts, message_obj):
              except Exception as e:
                  logger.error(f"Error scanning history: {e}")
                  await msg_edit(message_obj, f"Error scanning history: {e}")
+                 if thumb_path and os.path.exists(thumb_path): os.remove(thumb_path)
                  return
         else:
              pass 
 
-        # --- PROCESSING LOOP ---
-        
         def chunk_generator():
             if task_mode == "id_scan":
                 for k in range(0, len(message_ids_to_process), 200):
@@ -134,13 +148,11 @@ async def run_forwarding_task(bot, user_id, frwd_id, bot_id, sts, message_obj):
                 continue
 
             for message in messages:
-                # --- INSTANT CANCEL CHECK ---
                 if temp.CANCEL.get(frwd_id):
                     final_status = "cancelled"
                     break
-                # ----------------------------
 
-                if time.time() - last_update_time > 10: # Faster UI updates
+                if time.time() - last_update_time > 10:
                     await edit_progress(message_obj, sts, "running", extra_info)
                     last_update_time = time.time()
                 
@@ -155,42 +167,54 @@ async def run_forwarding_task(bot, user_id, frwd_id, bot_id, sts, message_obj):
                 try:
                     capt = custom_caption(message, caption)
                     
-                    if is_bot_mode:
-                        # --- BOT: RESTRICTION BYPASS (FILE ID FETCH & SEND) ---
-                        # Bots often fail to 'copy' from restricted channels. 
-                        # We explicitly fetch the file_id and send it as a new message.
+                    # Logic: If Bot OR (Userbot AND Thumb is set), use send_... methods.
+                    # Otherwise (Userbot AND No Thumb), use copy.
+                    
+                    use_send_method = is_bot_mode or (thumb_path is not None)
+
+                    if use_send_method:
                         if message.media:
+                            # Helper to prepare args
+                            send_args = {
+                                "chat_id": i.TO, 
+                                "caption": capt, 
+                                "reply_markup": button, 
+                                "protect_content": protect
+                            }
+                            if thumb_path: send_args['thumb'] = thumb_path
+
                             if message.photo:
-                                await client_instance.send_photo(i.TO, message.photo.file_id, caption=capt, reply_markup=button, protect_content=protect)
+                                await client_instance.send_photo(photo=message.photo.file_id, **send_args)
                             elif message.video:
-                                await client_instance.send_video(i.TO, message.video.file_id, caption=capt, reply_markup=button, protect_content=protect)
+                                await client_instance.send_video(video=message.video.file_id, **send_args)
                             elif message.document:
-                                await client_instance.send_document(i.TO, message.document.file_id, caption=capt, reply_markup=button, protect_content=protect)
+                                await client_instance.send_document(document=message.document.file_id, **send_args)
                             elif message.audio:
-                                await client_instance.send_audio(i.TO, message.audio.file_id, caption=capt, reply_markup=button, protect_content=protect)
+                                await client_instance.send_audio(audio=message.audio.file_id, **send_args)
                             elif message.voice:
-                                await client_instance.send_voice(i.TO, message.voice.file_id, caption=capt, reply_markup=button, protect_content=protect)
-                            elif message.sticker:
-                                await client_instance.send_sticker(i.TO, message.sticker.file_id, reply_markup=button, protect_content=protect)
+                                await client_instance.send_voice(voice=message.voice.file_id, **send_args)
                             elif message.animation:
-                                await client_instance.send_animation(i.TO, message.animation.file_id, caption=capt, reply_markup=button, protect_content=protect)
+                                await client_instance.send_animation(animation=message.animation.file_id, **send_args)
+                            elif message.sticker:
+                                # Stickers usually don't have captions/thumbs in standard send
+                                try: await client_instance.send_sticker(chat_id=i.TO, sticker=message.sticker.file_id)
+                                except: pass 
                             elif message.video_note:
-                                await client_instance.send_video_note(i.TO, message.video_note.file_id, reply_markup=button, protect_content=protect)
+                                try: await client_instance.send_video_note(chat_id=i.TO, video_note=message.video_note.file_id)
+                                except: pass
                             else:
-                                # Fallback for complex types (polls, etc) - Try copy, might fail on restricted
+                                # Fallback
                                 try: await message.copy(i.TO, caption=capt, reply_markup=button, protect_content=protect)
                                 except: sts.add('failed'); continue
                             
                             sts.add('total_files')
 
                         elif message.text:
-                            # For text, we just send the raw text content
                             await client_instance.send_message(i.TO, message.text.html, reply_markup=button, disable_web_page_preview=True, protect_content=protect)
                             sts.add('total_files')
 
                     else:
-                        # --- USERBOT: DIRECT COPY ---
-                        # Userbots are less restricted and 'copy' works better to preserve structure (like albums)
+                        # Direct Copy (Userbot No Thumb)
                         await message.copy(chat_id=i.TO, caption=capt, reply_markup=button, protect_content=protect)
                         sts.add('total_files')
                     
@@ -205,7 +229,6 @@ async def run_forwarding_task(bot, user_id, frwd_id, bot_id, sts, message_obj):
 
             if temp.CANCEL.get(frwd_id): break
             
-            # Save progress
             await db.save_task(frwd_id, {'fetched': sts.get('fetched'), 'mode': task_mode})
 
         if not temp.CANCEL.get(frwd_id): final_status = "completed"
@@ -216,9 +239,15 @@ async def run_forwarding_task(bot, user_id, frwd_id, bot_id, sts, message_obj):
         await msg_edit(message_obj, f"An error occurred: `{e}`")
 
     finally:
+        # CLEANUP THUMB
+        if thumb_path and os.path.exists(thumb_path):
+            try: os.remove(thumb_path)
+            except: pass
+
         await edit_progress(message_obj, sts, final_status, extra_info if 'extra_info' in locals() else None)
         await stop(client_instance, user_id, frwd_id)
 
+# ... (rest of the file remains same: pub_, resume_forwarding, restore_progress_cb, get_frwd_status, msg_edit, edit_progress, stop, custom_caption, get_size, retry_btn) ...
 @Client.on_callback_query(filters.regex(r'^start_public'))
 async def pub_(bot, cb):
     user_id = cb.from_user.id

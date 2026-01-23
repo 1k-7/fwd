@@ -1,3 +1,4 @@
+# mistaldrin/fwd/fwd-dawn-improve-v2/plugins/settings.py
 import asyncio
 import random
 import logging
@@ -51,7 +52,7 @@ async def settings_query(bot, query):
                 reply_markup=main_buttons()
             )
 
-        elif type in ["caption", "button", "db_uri", "file_size", "size_limit", "extension", "keywords"]:
+        elif type in ["caption", "button", "db_uri", "file_size", "size_limit", "extension", "keywords", "thumbnail"]:
             prompt_text = {
                 "caption": "Send your custom caption. Use placeholders like `{filename}`, `{size}`, and `{caption}`.",
                 "button": "Send your button in the format: `[Button Text][buttonurl:https://example.com]`",
@@ -59,7 +60,8 @@ async def settings_query(bot, query):
                 "file_size": "Send the file size limit in MB.",
                 "size_limit": "Choose whether to allow files 'above' or 'below' the size limit.",
                 "extension": "Send a comma-separated list of file extensions to filter (e.g., `mkv,mp4,zip`).",
-                "keywords": "Send a comma-separated list of keywords to filter. Use a `-` prefix to exclude messages with a keyword (e.g., `cat,-dog`)."
+                "keywords": "Send a comma-separated list of keywords to filter. Use a `-` prefix to exclude messages with a keyword (e.g., `cat,-dog`).",
+                "thumbnail": "Send a **Photo** to set as your custom thumbnail.\n\nFiles forwarded (by bot or userbot) will use this thumbnail."
             }
             await query.message.delete()
             prompt = await bot.send_message(user_id, prompt_text[type] + "\n\n/cancel to abort. /reset to clear this setting.")
@@ -106,7 +108,7 @@ async def settings_query(bot, query):
         elif type=="adduserbot":
            await query.message.delete()
            temp.USER_STATES[user_id] = {"state": "awaiting_user_session"}
-           await bot.send_message(user_id, "Send the Pyrogram (v2) session string.\n\n/cancel - to cancel.")
+           await bot.send_message(user_id, "Send the Pyrogram (v2) session string.\n\nGet one from @mdsessiongenbot.\n\n/cancel - to cancel.")
 
         elif type.startswith("editbot"):
            bot_id = int(data)
@@ -180,13 +182,14 @@ def main_buttons():
         InlineKeyboardButton('Button', callback_data='settings#button')
     ], [
         InlineKeyboardButton('Message Filters', callback_data='settings#filters'),
-        InlineKeyboardButton('File Size Filter', callback_data='settings#file_size')
+        InlineKeyboardButton('Custom Thumbnail', callback_data='settings#thumbnail')
+    ], [
+        InlineKeyboardButton('File Size Filter', callback_data='settings#file_size'),
+        InlineKeyboardButton('Duplicate Check DB', callback_data='settings#db_uri')
     ], [
         InlineKeyboardButton('Keyword Filter', callback_data='settings#keywords'),
         InlineKeyboardButton('Extension Filter', callback_data='settings#extension')
     ], [
-        InlineKeyboardButton('Duplicate Check DB', callback_data='settings#db_uri')
-    ],[
         InlineKeyboardButton('« Back', callback_data='back')
     ]]
     return InlineKeyboardMarkup(buttons)

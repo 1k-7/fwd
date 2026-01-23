@@ -17,8 +17,6 @@ main_buttons = [[
         InlineKeyboardButton('About', callback_data='about')
 ]]
 
-
-
 #===================Start Function===================#
 
 @Client.on_message(filters.private & filters.command(['start']))
@@ -68,8 +66,13 @@ async def confirm_reset_callback(bot, query):
 
 #==================Restart Function==================#
 
-@Client.on_message(filters.private & filters.command(['restart', "r"]) & filters.user(Config.OWNER_ID))
+@Client.on_message(filters.private & filters.command(['restart', "r"]))
 async def restart(client, message):
+    user_id = message.from_user.id
+    # Check for Owner OR Sudo
+    if user_id not in Config.OWNER_ID and user_id not in temp.SUDO_USERS:
+        return
+
     msg = await message.reply_text(
         text="<i>Restarting...</i>",
         quote=True
@@ -108,12 +111,10 @@ async def forward_delay(client, message):
     if ban_status["is_banned"]:
         return await message.reply_text(f"Access denied.\n\nReason: {ban_status['ban_reason']}")
 
-    # Get current configs first to display the existing value
     user_configs = await db.get_configs(user_id)
     current_delay = user_configs.get('forward_delay', 0.5)
 
     if len(message.command) < 2:
-        # If no new value is provided, show the help text with the current delay
         return await message.reply_text(Translation.FORWARDELAY_TXT.format(current_delay=current_delay))
     
     try:
@@ -216,7 +217,6 @@ async def active_tasks_cb(bot, query_or_message):
 
 @Client.on_callback_query(filters.regex(r'^cancel_task_'))
 async def cancel_task_confirmation_cb(bot, query):
-    """Asks the user to confirm the cancellation."""
     user_id = query.from_user.id
     task_id = query.data.split("_", 2)[2]
     
@@ -224,7 +224,6 @@ async def cancel_task_confirmation_cb(bot, query):
         await query.answer("This task is no longer active.", show_alert=True)
         return await active_tasks_cb(bot, query)
 
-    # Changed the "No" button to restore the progress view instead of going to task list
     await query.message.edit_text(
         f"<b>Are you sure you want to cancel this task?</b>\n\nTask ID: <code>{task_id[:8]}...</code>",
         reply_markup=InlineKeyboardMarkup([
@@ -235,7 +234,6 @@ async def cancel_task_confirmation_cb(bot, query):
 
 @Client.on_callback_query(filters.regex(r'^confirm_cancel_'))
 async def confirm_cancel_task_cb(bot, query):
-    """Sets the cancellation flag and provides immediate feedback."""
     user_id = query.from_user.id
     task_id = query.data.split("_", 2)[2]
 
