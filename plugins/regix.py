@@ -169,7 +169,7 @@ async def run_forwarding_task(bot, user_id, frwd_id, bot_id, sts, message_obj):
                     use_send_method = (thumb_path is not None) or is_bot_mode
 
                     # ---------------- VIDEO COVER IMPLEMENTATION ----------------
-                    # Checks: It is a Video, we have a custom thumb, and it is NOT a document.
+                    # Implements the specific copy method for videos with custom thumbnails
                     if message.video and thumb_path and not message.document:
                         try:
                             # Use pyrotgfork's video_cover parameter in copy
@@ -178,13 +178,12 @@ async def run_forwarding_task(bot, user_id, frwd_id, bot_id, sts, message_obj):
                                 caption=capt,
                                 reply_markup=button,
                                 protect_content=protect,
-                                video_cover=thumb_path # Pass the local path
+                                video_cover=thumb_path 
                             )
                             sts.add('total_files')
                             if not forward_tag: await asyncio.sleep(delay)
-                            continue # Skip the rest of the loop for this message
+                            continue # Successfully forwarded, skip standard handler
                         except Exception as e_vc:
-                            # Fallback if video_cover fails or is not supported in current context
                             logger.error(f"Copy with video_cover failed: {e_vc}. Falling back to standard send.")
                     # ------------------------------------------------------------
 
@@ -397,7 +396,6 @@ async def edit_progress(msg, sts, status, extra_info=None):
                 f"━━━━━━━━━━━━━━━━━━━━\n"
                 f"<b>Status:</b> {status.title()}")
 
-        # FIX: Added callback_data= for the Cancel button
         button = InlineKeyboardMarkup([[InlineKeyboardButton(f"📊 Status: {percentage}%", callback_data=f'frwd_status_{i.id}')], [InlineKeyboardButton('❌ Cancel ❌', callback_data=f'cancel_task_{i.id}')]])
     else:
         end_time = time.time(); time_taken = sts.get_readable_time(int(end_time - i.start))
@@ -453,5 +451,4 @@ def get_size(size):
     except: return "N/A"
 
 def retry_btn(id):
-    # FIX: Added callback_data=
     return InlineKeyboardMarkup([[InlineKeyboardButton('Retry', callback_data=f"start_public_{id}")]])
