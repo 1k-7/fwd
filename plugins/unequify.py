@@ -329,7 +329,8 @@ async def edit_unequify_progress(msg, scanned, deleted, total, start_time, task_
             status=status, scanned=scanned, total=total, deleted=deleted,
             percentage=percentage, eta=eta, progress_bar=progress_bar
         )
-        button = InlineKeyboardMarkup([[InlineKeyboardButton(f"📊 Status: {percentage}%", callback_data=f'uneq_status_{task_id}')], [InlineKeyboardButton('❌ Cancel ❌', f'cancel_task_{task_id}')]])
+        # FIX: Added callback_data= for Cancel button
+        button = InlineKeyboardMarkup([[InlineKeyboardButton(f"📊 Status: {percentage}%", callback_data=f'uneq_status_{task_id}')], [InlineKeyboardButton('❌ Cancel ❌', callback_data=f'cancel_task_{task_id}')]])
     else:
         # Modern Completion Card
         icon = "✅" if status == "completed" else "❌"

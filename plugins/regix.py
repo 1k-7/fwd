@@ -16,12 +16,6 @@ from pyrogram.enums import ParseMode, MessageMediaType
 from pyrogram.errors import FloodWait, MessageNotModified, RPCError, MediaEmpty, UserIsBlocked, PeerIdInvalid
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery, Message
 
-# Use the CLIENT class from test.py directly, do not re-instantiate globally here if not needed
-# or instantiate it once safely.
-# CLIENT = CLIENT()  <-- REMOVED to avoid conflicts, use CLIENT from test.py if it's an instance, 
-# or instantiate locally.
-# Looking at test.py, CLIENT is a class. We should instantiate it when needed.
-
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
@@ -403,7 +397,8 @@ async def edit_progress(msg, sts, status, extra_info=None):
                 f"━━━━━━━━━━━━━━━━━━━━\n"
                 f"<b>Status:</b> {status.title()}")
 
-        button = InlineKeyboardMarkup([[InlineKeyboardButton(f"📊 Status: {percentage}%", callback_data=f'frwd_status_{i.id}')], [InlineKeyboardButton('❌ Cancel ❌', f'cancel_task_{i.id}')]])
+        # FIX: Added callback_data= for the Cancel button
+        button = InlineKeyboardMarkup([[InlineKeyboardButton(f"📊 Status: {percentage}%", callback_data=f'frwd_status_{i.id}')], [InlineKeyboardButton('❌ Cancel ❌', callback_data=f'cancel_task_{i.id}')]])
     else:
         end_time = time.time(); time_taken = sts.get_readable_time(int(end_time - i.start))
         total_skipped = i.deleted + i.duplicate + i.filtered
@@ -458,4 +453,5 @@ def get_size(size):
     except: return "N/A"
 
 def retry_btn(id):
-    return InlineKeyboardMarkup([[InlineKeyboardButton('Retry', f"start_public_{id}")]])
+    # FIX: Added callback_data=
+    return InlineKeyboardMarkup([[InlineKeyboardButton('Retry', callback_data=f"start_public_{id}")]])
