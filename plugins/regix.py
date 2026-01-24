@@ -41,7 +41,6 @@ async def run_forwarding_task(bot, user_id, frwd_id, bot_id, sts, message_obj):
         thumb_id = data_params.get('thumbnail')
         if thumb_id:
             try:
-                # Download raw thumb (Use AS IS, no formatting)
                 thumb_path = await bot.download_media(thumb_id)
             except Exception as e:
                 logger.error(f"Failed to prepare thumbnail: {e}")
@@ -56,7 +55,6 @@ async def run_forwarding_task(bot, user_id, frwd_id, bot_id, sts, message_obj):
             mode_label = "Userbot (Direct Copy)"
 
         await msg_edit(message_obj, "Starting client...")
-        # Instantiate CLIENT class here
         client_helper = CLIENT() 
         client_instance = await start_clone_bot(client_helper.client(_bot_data), _bot_data)
         
@@ -139,12 +137,26 @@ async def run_forwarding_task(bot, user_id, frwd_id, bot_id, sts, message_obj):
             
             if not chunk: continue
 
-            try:
-                messages = await client_instance.get_messages(i.FROM, chunk)
-            except Exception as e_fetch:
-                logger.error(f"Could not fetch message chunk: {e_fetch}")
-                sts.add('failed', len(chunk)); sts.add('fetched', len(chunk))
+            # --- SMART FETCH RETRY LOOP ---
+            messages = []
+            fetch_attempts = 0
+            while fetch_attempts < 3:
+                try:
+                    messages = await client_instance.get_messages(i.FROM, chunk)
+                    break
+                except FloodWait as e:
+                    logger.warning(f"FloodWait during Fetch: Sleeping {e.value + 1}s")
+                    await asyncio.sleep(e.value + 1)
+                except Exception as e_fetch:
+                    logger.error(f"Fetch chunk error: {e_fetch}")
+                    break
+                fetch_attempts += 1
+            
+            if not messages:
+                sts.add('failed', len(chunk))
+                sts.add('fetched', len(chunk))
                 continue
+            # ------------------------------
 
             for message in messages:
                 if temp.CANCEL.get(frwd_id):
@@ -160,17 +172,19 @@ async def run_forwarding_task(bot, user_id, frwd_id, bot_id, sts, message_obj):
                 if message and message.chat and message.chat.id != from_chat_details.id:
                      continue 
 
+                # Filter Logic
                 if not message or message.empty or message.service or (message.media and str(message.media.value) in filters_to_apply) or (not message.media and "text" in filters_to_apply):
-                    sts.add('filtered'); continue
+                    sts.add('filtered')
+                    continue
 
-                # --- RETRY LOOP FOR RELIABILITY ---
+                # --- INFINITE SEND RETRY LOOP ---
                 while True:
                     try:
                         capt = custom_caption(message, caption)
                         use_send_method = (thumb_path is not None) or is_bot_mode
                         success = False
 
-                        # 1. Try Video Cover
+                        # 1. Video Cover Logic
                         if message.video and thumb_path and not message.document:
                             try:
                                 await message.copy(
@@ -182,9 +196,9 @@ async def run_forwarding_task(bot, user_id, frwd_id, bot_id, sts, message_obj):
                                 )
                                 success = True
                             except Exception as e_vc:
-                                logger.error(f"Copy with video_cover failed: {e_vc}. Falling back.")
+                                logger.error(f"Video cover failed: {e_vc}. Retrying with standard.")
 
-                        # 2. Standard Send/Copy Logic (if video cover didn't handle it)
+                        # 2. Standard Logic
                         if not success:
                             if use_send_method and message.media:
                                 send_args = {
@@ -219,12 +233,6 @@ async def run_forwarding_task(bot, user_id, frwd_id, bot_id, sts, message_obj):
                                         await client_instance.send_video_note(chat_id=i.TO, video_note=message.video_note.file_id)
                                     else:
                                         await message.copy(i.TO, caption=capt, reply_markup=button, protect_content=protect)
-                                except Exception as e_send:
-                                    if thumb_path:
-                                        logger.error(f"Send with thumb failed: {e_send}. Trying copy.")
-                                        await message.copy(i.TO, caption=capt, reply_markup=button, protect_content=protect)
-                                    else:
-                                        raise e_send
                                 finally:
                                     if thumb_file: thumb_file.close()
 
@@ -233,22 +241,21 @@ async def run_forwarding_task(bot, user_id, frwd_id, bot_id, sts, message_obj):
                             else:
                                 await message.copy(chat_id=i.TO, caption=capt, reply_markup=button, protect_content=protect)
                         
-                        # If we reached here, message was sent
+                        # Success
                         sts.add('total_files')
                         if not forward_tag: await asyncio.sleep(delay)
-                        break # Exit Retry Loop
+                        break # Break Retry Loop
 
                     except FloodWait as e:
-                        # As requested: 3600s -> 3601s
-                        wait_time = e.value + 1
-                        logger.warning(f"FloodWait: Sleeping {wait_time}s...")
-                        await asyncio.sleep(wait_time)
-                        continue # Restart Loop (Retry same message)
+                        wait_seconds = e.value + 1
+                        logger.warning(f"FloodWait hit! Sleeping for {wait_seconds}s...")
+                        await asyncio.sleep(wait_seconds)
+                        continue # Retry the SAME message
                     
                     except Exception as e:
-                        logger.error(f"Failed to process message {message.id}: {e}", exc_info=False)
+                        logger.error(f"Failed to process message {message.id}: {e}")
                         sts.add('failed')
-                        break # Exit Loop (Move to next message)
+                        break # Skip message on non-flood error
 
             if temp.CANCEL.get(frwd_id): break
             
