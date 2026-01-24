@@ -302,7 +302,8 @@ def main_buttons():
     ])
 
 # --- SETTINGS INPUT HANDLER ---
-@Client.on_message(filters.private & filters.incoming, group=-1)
+# CHANGED GROUP TO -2 TO ENSURE IT RUNS BEFORE PUBLIC.PY HANDLER
+@Client.on_message(filters.private & filters.incoming, group=-2)
 async def settings_input_handler(bot: Client, message: Message):
     if message.edit_date: return
 
