@@ -194,11 +194,16 @@ async def settings_query(bot, query):
         elif type == "viewthumb":
             configs = await get_configs(user_id)
             thumb = configs.get('thumbnail')
-            if not thumb: return await query.answer("No thumbnail set", show_alert=True)
+            if not thumb: 
+                return await query.answer("No thumbnail set", show_alert=True)
+            
+            # Send photo, wait 10s, delete
             try:
-                await query.message.edit_media(media=InputMediaPhoto(thumb, caption="<b>Current Custom Thumbnail</b>"), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="settings#thumbnail")]]))
-            except:
-                await query.message.reply_photo(thumb, caption="<b>Current Custom Thumbnail</b>", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="settings#thumbnail")]]))
+                msg = await bot.send_photo(user_id, thumb, caption="<b>Current Thumbnail</b>\n<i>This message will auto-delete in 10s.</i>")
+                await asyncio.sleep(10)
+                await msg.delete()
+            except Exception as e:
+                await query.answer(f"Error fetching thumb: {e}", show_alert=True)
 
         elif type == "filters":
             await edit_or_reply(query.message, "<b>Message Filters</b>\n\nToggle which message types to forward.", reply_markup=await get_filters_markup(user_id))
@@ -302,7 +307,6 @@ def main_buttons():
     ])
 
 # --- SETTINGS INPUT HANDLER ---
-# CHANGED GROUP TO -2 TO ENSURE IT RUNS BEFORE PUBLIC.PY HANDLER
 @Client.on_message(filters.private & filters.incoming, group=-2)
 async def settings_input_handler(bot: Client, message: Message):
     if message.edit_date: return
@@ -358,9 +362,17 @@ async def settings_input_handler(bot: Client, message: Message):
              elif not (message.text.startswith("mongodb") or message.text.startswith("mongodb+srv")): error_msg = "❌ Invalid MongoDB URI. It must start with `mongodb`."
              else: value = message.text
         elif setting_key == "thumbnail":
-            if message.photo: value = message.photo.file_id
-            elif message.document and message.document.mime_type.startswith("image/"): value = message.document.file_id
-            else: error_msg = "❌ Invalid media. Send a Photo or an Image Document."
+            if message.photo: 
+                value = message.photo.file_id
+            elif message.document:
+                # Accept document if it's an image type
+                if (message.document.mime_type and message.document.mime_type.startswith("image/")) or \
+                   (message.document.file_name and message.document.file_name.lower().endswith(('.jpg', '.jpeg', '.png', '.webp'))):
+                    value = message.document.file_id
+                else:
+                    error_msg = "❌ Invalid file. Please send an Image File (JPG, PNG, etc)."
+            else: 
+                error_msg = "❌ Invalid media. Send a Photo or an Image Document."
         else: 
             if not message.text: error_msg = "❌ Error: Text required."
             else: value = message.text
@@ -373,22 +385,22 @@ async def settings_input_handler(bot: Client, message: Message):
         await update_configs(user_id, setting_key, value)
         temp.USER_STATES.pop(user_id, None)
         
-        # REFRESH MENU
-        text, markup, thumb_id = await generate_setting_page(user_id, setting_key)
+        # REFRESH MENU CLEANLY (No "Saved" title, No automatic image attachment)
+        text, markup, _ = await generate_setting_page(user_id, setting_key)
         
         if prompt_id:
             try:
-                if thumb_id: 
-                     await bot.edit_message_media(chat_id=user_id, message_id=prompt_id, 
-                         media=InputMediaPhoto(thumb_id, caption="✅ Saved!\n\n" + text), reply_markup=markup)
-                else:
-                     await bot.edit_message_text(chat_id=user_id, message_id=prompt_id, 
-                         text=f"✅ <b>Saved Successfully!</b>\n\n{text}", reply_markup=markup)
+                # Always revert to ZEN image to avoid attaching the user's thumbnail to the menu
+                await bot.edit_message_media(
+                    chat_id=user_id, 
+                    message_id=prompt_id, 
+                    media=InputMediaPhoto(random.choice(ZEN), caption=text), 
+                    reply_markup=markup
+                )
             except Exception:
                 try: await bot.delete_messages(user_id, prompt_id)
                 except: pass
-                if thumb_id: await bot.send_photo(user_id, photo=thumb_id, caption="✅ Saved!\n\n" + text, reply_markup=markup)
-                else: await bot.send_message(user_id, f"✅ <b>Saved Successfully!</b>\n\n{text}", reply_markup=markup)
+                await bot.send_photo(user_id, photo=random.choice(ZEN), caption=text, reply_markup=markup)
     
     elif current_state == "awaiting_channel_forward":
         try: await message.delete()
@@ -414,7 +426,6 @@ async def settings_input_handler(bot: Client, message: Message):
         if prompt_id:
              try: await bot.delete_messages(user_id, prompt_id)
              except: pass
-        # FIXED: Removed parens so it calls the method on the instance `CLIENT`
         await CLIENT.add_bot(bot, message)
         temp.USER_STATES.pop(user_id, None)
     
@@ -424,7 +435,6 @@ async def settings_input_handler(bot: Client, message: Message):
         if prompt_id:
              try: await bot.delete_messages(user_id, prompt_id)
              except: pass
-        # FIXED: Removed parens so it calls the method on the instance `CLIENT`
         await CLIENT.add_session(bot, message)
         temp.USER_STATES.pop(user_id, None)
 
