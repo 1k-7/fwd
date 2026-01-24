@@ -163,96 +163,92 @@ async def run_forwarding_task(bot, user_id, frwd_id, bot_id, sts, message_obj):
                 if not message or message.empty or message.service or (message.media and str(message.media.value) in filters_to_apply) or (not message.media and "text" in filters_to_apply):
                     sts.add('filtered'); continue
 
-                try:
-                    capt = custom_caption(message, caption)
-                    
-                    use_send_method = (thumb_path is not None) or is_bot_mode
+                # --- RETRY LOOP FOR RELIABILITY ---
+                while True:
+                    try:
+                        capt = custom_caption(message, caption)
+                        use_send_method = (thumb_path is not None) or is_bot_mode
+                        success = False
 
-                    # ---------------- VIDEO COVER IMPLEMENTATION ----------------
-                    # Checks: It is a Video, we have a custom thumb, and it is NOT a document.
-                    if message.video and thumb_path and not message.document:
-                        try:
-                            # Use pyrotgfork's video_cover parameter in copy
-                            await message.copy(
-                                i.TO,
-                                caption=capt,
-                                reply_markup=button,
-                                protect_content=protect,
-                                video_cover=thumb_path # Pass the local path string
-                            )
-                            sts.add('total_files')
-                            if not forward_tag: await asyncio.sleep(delay)
-                            continue # Successfully forwarded with cover
-                        except Exception as e_vc:
-                            # Fallback if video_cover fails or is not supported in current context
-                            logger.error(f"Copy with video_cover failed: {e_vc}. Falling back to standard send.")
-                            # IMPORTANT: We do NOT continue here, so it falls through to 'use_send_method' logic below
-                    # ------------------------------------------------------------
+                        # 1. Try Video Cover
+                        if message.video and thumb_path and not message.document:
+                            try:
+                                await message.copy(
+                                    i.TO,
+                                    caption=capt,
+                                    reply_markup=button,
+                                    protect_content=protect,
+                                    video_cover=thumb_path
+                                )
+                                success = True
+                            except Exception as e_vc:
+                                logger.error(f"Copy with video_cover failed: {e_vc}. Falling back.")
 
-                    if use_send_method and message.media:
-                        send_args = {
-                            "chat_id": i.TO, 
-                            "caption": capt, 
-                            "reply_markup": button, 
-                            "protect_content": protect
-                        }
+                        # 2. Standard Send/Copy Logic (if video cover didn't handle it)
+                        if not success:
+                            if use_send_method and message.media:
+                                send_args = {
+                                    "chat_id": i.TO, 
+                                    "caption": capt, 
+                                    "reply_markup": button, 
+                                    "protect_content": protect
+                                }
+                                thumb_file = open(thumb_path, 'rb') if thumb_path else None
+                                try:
+                                    if message.photo:
+                                        await client_instance.send_photo(photo=message.photo.file_id, **send_args)
+                                    elif message.video:
+                                        if thumb_file: send_args['thumb'] = thumb_file
+                                        await client_instance.send_video(video=message.video.file_id, **send_args)
+                                    elif message.document:
+                                        if thumb_file: send_args['thumb'] = thumb_file
+                                        await client_instance.send_document(document=message.document.file_id, **send_args)
+                                    elif message.audio:
+                                        if thumb_file: send_args['thumb'] = thumb_file
+                                        await client_instance.send_audio(audio=message.audio.file_id, **send_args)
+                                    elif message.voice:
+                                        if thumb_file: send_args['thumb'] = thumb_file
+                                        await client_instance.send_voice(voice=message.voice.file_id, **send_args)
+                                    elif message.animation:
+                                        if thumb_file: send_args['thumb'] = thumb_file
+                                        await client_instance.send_animation(animation=message.animation.file_id, **send_args)
+                                    elif message.sticker:
+                                        await client_instance.send_sticker(chat_id=i.TO, sticker=message.sticker.file_id) 
+                                    elif message.video_note:
+                                        if thumb_file: send_args['thumb'] = thumb_file
+                                        await client_instance.send_video_note(chat_id=i.TO, video_note=message.video_note.file_id)
+                                    else:
+                                        await message.copy(i.TO, caption=capt, reply_markup=button, protect_content=protect)
+                                except Exception as e_send:
+                                    if thumb_path:
+                                        logger.error(f"Send with thumb failed: {e_send}. Trying copy.")
+                                        await message.copy(i.TO, caption=capt, reply_markup=button, protect_content=protect)
+                                    else:
+                                        raise e_send
+                                finally:
+                                    if thumb_file: thumb_file.close()
+
+                            elif message.text:
+                                await client_instance.send_message(i.TO, message.text.html, reply_markup=button, disable_web_page_preview=True, protect_content=protect)
+                            else:
+                                await message.copy(chat_id=i.TO, caption=capt, reply_markup=button, protect_content=protect)
                         
-                        try:
-                            thumb_file = open(thumb_path, 'rb') if thumb_path else None
-                            
-                            if message.photo:
-                                await client_instance.send_photo(photo=message.photo.file_id, **send_args)
-                            elif message.video:
-                                if thumb_file: send_args['thumb'] = thumb_file
-                                await client_instance.send_video(video=message.video.file_id, **send_args)
-                            elif message.document:
-                                if thumb_file: send_args['thumb'] = thumb_file
-                                await client_instance.send_document(document=message.document.file_id, **send_args)
-                            elif message.audio:
-                                if thumb_file: send_args['thumb'] = thumb_file
-                                await client_instance.send_audio(audio=message.audio.file_id, **send_args)
-                            elif message.voice:
-                                if thumb_file: send_args['thumb'] = thumb_file
-                                await client_instance.send_voice(voice=message.voice.file_id, **send_args)
-                            elif message.animation:
-                                if thumb_file: send_args['thumb'] = thumb_file
-                                await client_instance.send_animation(animation=message.animation.file_id, **send_args)
-                            elif message.sticker:
-                                await client_instance.send_sticker(chat_id=i.TO, sticker=message.sticker.file_id) 
-                            elif message.video_note:
-                                if thumb_file: send_args['thumb'] = thumb_file
-                                await client_instance.send_video_note(chat_id=i.TO, video_note=message.video_note.file_id)
-                            else:
-                                await message.copy(i.TO, caption=capt, reply_markup=button, protect_content=protect)
-                            
-                            if thumb_file: thumb_file.close()
-                            sts.add('total_files')
-
-                        except Exception as e_send:
-                            if thumb_file: thumb_file.close()
-                            if thumb_path:
-                                logger.error(f"Send with thumb failed: {e_send}. Trying copy (thumb will be lost).")
-                                await message.copy(i.TO, caption=capt, reply_markup=button, protect_content=protect)
-                                sts.add('total_files')
-                            else:
-                                raise e_send
-
-                    elif message.text:
-                         await client_instance.send_message(i.TO, message.text.html, reply_markup=button, disable_web_page_preview=True, protect_content=protect)
-                         sts.add('total_files')
-
-                    else:
-                        await message.copy(chat_id=i.TO, caption=capt, reply_markup=button, protect_content=protect)
+                        # If we reached here, message was sent
                         sts.add('total_files')
+                        if not forward_tag: await asyncio.sleep(delay)
+                        break # Exit Retry Loop
+
+                    except FloodWait as e:
+                        # As requested: 3600s -> 3601s
+                        wait_time = e.value + 1
+                        logger.warning(f"FloodWait: Sleeping {wait_time}s...")
+                        await asyncio.sleep(wait_time)
+                        continue # Restart Loop (Retry same message)
                     
-                    if not forward_tag: await asyncio.sleep(delay)
-                    
-                except FloodWait as e:
-                    await asyncio.sleep(e.value + 2)
-                    sts.add('failed')
-                except Exception as e:
-                    logger.error(f"Failed to process message {message.id}: {e}", exc_info=False)
-                    sts.add('failed')
+                    except Exception as e:
+                        logger.error(f"Failed to process message {message.id}: {e}", exc_info=False)
+                        sts.add('failed')
+                        break # Exit Loop (Move to next message)
 
             if temp.CANCEL.get(frwd_id): break
             
