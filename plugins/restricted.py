@@ -6,17 +6,16 @@ import math
 import logging
 from uuid import uuid4
 from pyrogram import Client, filters, enums
-from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message, CallbackQuery
-from pyrogram.errors import FloodWait, PeerIdInvalid, MessageNotModified
+from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from pyrogram.errors import FloodWait, StopPropagation, MessageNotModified
 
 # Import from existing modules
 from database import db
 from config import temp
 from plugins.test import CLIENT as PyClient, start_clone_bot
-from plugins.utils import STS, start_range_selection, edit_or_reply, get_readable_time
+from plugins.utils import STS, start_range_selection, edit_or_reply, get_readable_time, format_thumbnail
 from plugins.public import parse_message_input
-from plugins.regix import custom_caption, get_size
-
+from plugins.regix import custom_caption
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +62,7 @@ async def show_restr_settings(message, user_id):
         f"<b>Max File Size:</b> <code>{display_size}</code>\n"
         f"<b>Forward Delay:</b> <code>{delay} seconds</code>\n"
         f"<b>Custom Caption:</b> {'Set' if configs.get('caption') else 'Not Set'}\n\n"
-        "<i>These settings only apply to the /fwdrestricted command.</i>"
+        "<i>These override global settings. Global filters, custom buttons, and thumbnails from /settings will automatically apply.</i>"
     )
     
     buttons = [
@@ -119,6 +118,7 @@ async def restr_input_handler(bot, message):
         # Handle source selection for /fwdrestricted
         await handle_restr_source(bot, message, user_id, state_info)
         message.stop_propagation()
+        return
         
     try: await message.delete()
     except: pass
@@ -127,10 +127,16 @@ async def restr_input_handler(bot, message):
         value = None
     elif setting_key == "file_size":
         try: value = float(message.text) * 1024 * 1024
-        except: return await bot.send_message(user_id, "❌ Invalid number.")
+        except: 
+            await bot.send_message(user_id, "❌ Invalid number.")
+            message.stop_propagation()
+            return
     elif setting_key == "delay":
         try: value = float(message.text)
-        except: return await bot.send_message(user_id, "❌ Invalid number.")
+        except: 
+            await bot.send_message(user_id, "❌ Invalid number.")
+            message.stop_propagation()
+            return
     elif setting_key == "caption":
         value = message.text
 
@@ -220,18 +226,20 @@ async def handle_restr_source(bot, message, user_id, state_info):
         await status_msg.delete()
         return await bot.send_message(user_id, f"❌ Error verifying source: `{e}`\nEnsure the userbot is in the restricted chat.")
     
-    # We delegate range selection to the public tool, but give it a unique final callback
     await start_range_selection(bot, status_msg, from_chat_id, from_title, to_chat_id, 1, end_id, final_callback_prefix="restr_final")
 
 
 # ==========================================
 # FINAL CONFIRMATION & TASK EXECUTION
 # ==========================================
-@Client.on_callback_query(filters.regex(r'^range_confirm_restr_final_'))
+# FIX: Use group=-1 and raise StopPropagation to intercept this before plugins/public.py ignores it!
+@Client.on_callback_query(filters.regex(r'^range_confirm_restr_final_'), group=-1)
 async def restr_final_confirmation(bot, query):
     session_id = query.data.split('_')[-1]
     session = temp.RANGE_SESSIONS.pop(session_id, None)
-    if not session: return await query.answer("Session expired.", show_alert=True)
+    if not session: 
+        await query.answer("Session expired.", show_alert=True)
+        raise StopPropagation
     
     user_id = query.from_user.id
     task_id = str(uuid4())
@@ -249,10 +257,11 @@ async def restr_final_confirmation(bot, query):
         f"<b>From:</b> <code>{session['from_title']}</code>\n"
         f"<b>To Chat ID:</b> <code>{session['to_chat_id']}</code>\n"
         f"<b>Range:</b> <code>{session['start_id']}</code> to <code>{session['end_id']}</code>\n\n"
-        "<i>Note: This process downloads files to the server and re-uploads them. It will be slower than normal forwarding.</i>"
+        "<i>Note: This process downloads files to the server and re-uploads them. Global filters and custom buttons apply.</i>"
     )
     
     await query.message.edit_text(text, reply_markup=markup)
+    raise StopPropagation # Prevents public.py from catching it and dropping it silently
 
 @Client.on_callback_query(filters.regex(r'^start_restr_task_'))
 async def start_restr_task(bot, query):
@@ -270,29 +279,48 @@ async def start_restr_task(bot, query):
     
     bot_id = temp.FORWARD_BOT_ID.get(user_id)
     _bot_data = await db.get_bot(user_id, bot_id)
-    configs = await get_restr_configs(user_id)
+    
+    # Get configurations
+    restr_configs = await get_restr_configs(user_id)
     
     status_msg = await query.message.edit_text("`Initializing Restricted Runner...`")
     
     # Run in background
-    asyncio.create_task(restricted_worker(bot, user_id, task_id, _bot_data, configs, status_msg, sts))
+    asyncio.create_task(restricted_worker(bot, user_id, task_id, _bot_data, restr_configs, status_msg, sts))
 
 
-async def restricted_worker(bot, user_id, task_id, bot_data, configs, message_obj, sts):
+async def restricted_worker(bot, user_id, task_id, bot_data, restr_configs, message_obj, sts):
     i = sts.get(full=True)
     client_instance = None
     
     start_id = min(i.start_id, i.end_id)
     end_id = max(i.start_id, i.end_id)
     
-    delay = configs.get('delay', 2.0)
-    size_limit = configs.get('file_size', 0)
-    custom_cap = configs.get('caption')
+    # 1. Gather all configs (Global & Restricted)
+    delay = restr_configs.get('delay', 2.0)
+    size_limit = restr_configs.get('file_size', 0)
+    restr_cap = restr_configs.get('caption')
+    
+    # Grab global filters, custom buttons, custom thumbnails, content protection
+    _, global_cap, _, data_params, protect, button = await sts.get_data(user_id, bot_id=bot_data['id'])
+    
+    filters_to_apply = data_params.get('filters', [])
+    final_caption = restr_cap if restr_cap else global_cap
+    thumb_id = data_params.get('thumbnail')
+    thumb_path = None
     
     temp.ACTIVE_TASKS[user_id] = {task_id: {"process": message_obj, "details": {"type": "Restricted Forwarding", "from": str(i.FROM), "to": str(i.TO)}}}
     last_update = time.time()
     
     try:
+        # Download and format global custom thumbnail if it exists
+        if thumb_id:
+            try:
+                thumb_path = await bot.download_media(thumb_id)
+                thumb_path = await format_thumbnail(thumb_path)
+            except Exception as e:
+                logger.error(f"Failed to prepare thumbnail: {e}")
+
         client_instance = await start_clone_bot(PyClient().client(bot_data), bot_data)
         
         for msg_id in range(start_id, end_id + 1):
@@ -305,27 +333,37 @@ async def restricted_worker(bot, user_id, task_id, bot_data, configs, message_ob
             
             file_path = None
             try:
-                # Fetch single message safely
                 messages = await client_instance.get_messages(i.FROM, [msg_id])
                 if not messages:
-                    sts.add('failed')
-                    sts.add('fetched')
+                    sts.add('failed'); sts.add('fetched')
                     continue
                     
                 msg = messages[0]
-                if msg.empty:
-                    sts.add('filtered')
-                    sts.add('fetched')
+                if msg.empty or msg.service:
+                    sts.add('filtered'); sts.add('fetched')
                     continue
                 
                 sts.add('fetched')
                 
-                # Extract Caption
-                capt = custom_caption(msg, custom_cap)
+                # --- Filter Check (Global Filters) ---
+                msg_type_str = str(msg.media.value) if msg.media else "text"
+                if msg_type_str in filters_to_apply:
+                    sts.add('filtered')
+                    continue
+                
+                # Format Caption
+                capt = custom_caption(msg, final_caption)
                 
                 # --- Text Message ---
-                if msg.text:
-                    await client_instance.send_message(i.TO, msg.text.html, parse_mode=enums.ParseMode.HTML)
+                if not msg.media and msg.text:
+                    await client_instance.send_message(
+                        i.TO, 
+                        msg.text.html, 
+                        parse_mode=enums.ParseMode.HTML,
+                        reply_markup=button,
+                        protect_content=protect,
+                        disable_web_page_preview=True
+                    )
                     sts.add('total_files')
                     await asyncio.sleep(delay)
                     continue
@@ -345,29 +383,44 @@ async def restricted_worker(bot, user_id, task_id, bot_data, configs, message_ob
                         sts.add('failed')
                         continue
                     
-                    # Upload
-                    if msg.photo:
-                        await client_instance.send_photo(i.TO, file_path, caption=capt)
-                    elif msg.video:
-                        await client_instance.send_video(i.TO, file_path, caption=capt)
-                    elif msg.document:
-                        await client_instance.send_document(i.TO, file_path, caption=capt)
-                    elif msg.audio:
-                        await client_instance.send_audio(i.TO, file_path, caption=capt)
-                    elif msg.voice:
-                        await client_instance.send_voice(i.TO, file_path, caption=capt)
-                    elif msg.animation:
-                        await client_instance.send_animation(i.TO, file_path, caption=capt)
-                    else:
-                        await client_instance.send_document(i.TO, file_path, caption=capt)
+                    send_args = {
+                        "chat_id": i.TO,
+                        "caption": capt,
+                        "reply_markup": button,
+                        "protect_content": protect
+                    }
+                    
+                    # Apply global custom thumbnail to the upload
+                    thumb_file = open(thumb_path, 'rb') if thumb_path else None
+                    
+                    try:
+                        if msg.photo:
+                            await client_instance.send_photo(photo=file_path, **send_args)
+                        elif msg.video:
+                            if thumb_file: send_args['thumb'] = thumb_file
+                            await client_instance.send_video(video=file_path, **send_args)
+                        elif msg.document:
+                            if thumb_file: send_args['thumb'] = thumb_file
+                            await client_instance.send_document(document=file_path, **send_args)
+                        elif msg.audio:
+                            if thumb_file: send_args['thumb'] = thumb_file
+                            await client_instance.send_audio(audio=file_path, **send_args)
+                        elif msg.voice:
+                            await client_instance.send_voice(voice=file_path, **send_args)
+                        elif msg.animation:
+                            if thumb_file: send_args['thumb'] = thumb_file
+                            await client_instance.send_animation(animation=file_path, **send_args)
+                        else:
+                            await client_instance.send_document(document=file_path, **send_args)
+                    finally:
+                        if thumb_file: thumb_file.close()
                         
                     sts.add('total_files')
                     await asyncio.sleep(delay)
                     
             except FloodWait as e:
                 await asyncio.sleep(e.value + 1)
-                # We skip retry logic for restricted to keep it simple, just count as failed
-                sts.add('failed')
+                sts.add('failed') # Simplify logic to avoid infinite loops
             except Exception as e:
                 logger.error(f"Restricted forward error on {msg_id}: {e}")
                 sts.add('failed')
@@ -379,10 +432,15 @@ async def restricted_worker(bot, user_id, task_id, bot_data, configs, message_ob
     except Exception as e:
         await edit_or_reply(message_obj, f"❌ **Fatal Error:** `{e}`")
     finally:
+        # Cleanup Custom Thumbnail from server if exists
+        if thumb_path and os.path.exists(thumb_path):
+            try: os.remove(thumb_path)
+            except: pass
+            
         final_status = "Cancelled" if temp.CANCEL.get(task_id) else "Completed"
         await edit_restr_progress(message_obj, sts, final_status)
         
-        # Cleanup
+        # Cleanup Active Trackers & Session
         if client_instance:
             try: await client_instance.stop()
             except: pass
