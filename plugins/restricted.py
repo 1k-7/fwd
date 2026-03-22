@@ -1,23 +1,78 @@
 # plugins/restricted.py
 import os
+import re
 import asyncio
 import time
 import math
 import logging
 from uuid import uuid4
-from pyrogram import Client, filters, enums
-from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-from pyrogram.errors import FloodWait, StopPropagation, MessageNotModified
 
-# Import from existing modules
+# FIX: Import StopPropagation from pyrogram directly, not from errors
+from pyrogram import Client, filters, enums, StopPropagation
+from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from pyrogram.errors import FloodWait, MessageNotModified
+
+# Import from existing modules safely
 from database import db
 from config import temp
 from plugins.test import CLIENT as PyClient, start_clone_bot
 from plugins.utils import STS, start_range_selection, edit_or_reply, get_readable_time, format_thumbnail
-from plugins.public import parse_message_input
-from plugins.regix import custom_caption
 
 logger = logging.getLogger(__name__)
+
+# ==========================================
+# SELF-CONTAINED HELPER FUNCTIONS
+# ==========================================
+def get_size(size):
+    try:
+        if not size: return "0 B"
+        units, size = ["B", "KB", "MB", "GB", "TB"], float(size)
+        i = 0
+        while size >= 1024.0 and i < len(units) - 1:
+            i += 1
+            size /= 1024.0
+        return f"{size:.2f} {units[i]}"
+    except: return "N/A"
+
+def custom_caption(msg, caption):
+    if not msg: return ""
+    fcaption_text = msg.text.html if msg.text else (msg.caption.html if msg.caption else "")
+    if not caption: return fcaption_text
+    file_name, file_size = "", "0 B"
+    if msg.media:
+        media = getattr(msg, msg.media.value, None)
+        if media:
+            file_name = getattr(media, 'file_name', '')
+            file_size = get_size(getattr(media, 'file_size', 0))
+    return caption.format(filename=file_name, size=file_size, caption=fcaption_text)
+
+def parse_message_input(message):
+    if not message or (not message.text and not message.forward_date):
+        return None, None, "Invalid input. A message link or forwarded message is required."
+
+    if message.text:
+        open_msg_match = re.search(r"tg://openmessage\?user_id=(\d+)(?:&message_id=(\d+))?", message.text)
+        if open_msg_match:
+            chat_id = int(open_msg_match.group(1))
+            msg_id = int(open_msg_match.group(2)) if open_msg_match.group(2) else None
+            return chat_id, msg_id, "id_scan"
+
+        chat_scheme_match = re.search(r"chat://@?([\w\d_]+)", message.text)
+        if chat_scheme_match:
+             return chat_scheme_match.group(1), None, "id_scan"
+
+    if message.text and not message.forward_date:
+        regex = re.compile(r"(https://)?(t\.me/|telegram\.me/|telegram\.dog/)(c/)?(\d+|[a-zA-Z_0-9]+)/(\d+)$")
+        match = regex.match(message.text.replace("?single", ""))
+        if not match: return None, None, 'Invalid Link.'
+        chat_id_str, msg_id = match.group(4), int(match.group(5))
+        chat_id = int(("-100" + chat_id_str)) if chat_id_str.isnumeric() else chat_id_str
+        return chat_id, msg_id, None
+    elif message.forward_from_chat and message.forward_from_chat.type == enums.ChatType.CHANNEL:
+        msg_id, chat_id = message.forward_from_message_id, message.forward_from_chat.username or message.forward_from_chat.id
+        return chat_id, msg_id, None
+    else:
+        return None, None, "Invalid input. Please forward from a channel or provide a valid message link."
 
 # ==========================================
 # DATABASE HELPERS FOR RESTRICTED SETTINGS
@@ -152,7 +207,6 @@ async def restr_input_handler(bot, message):
     await show_restr_settings(msg, user_id)
     message.stop_propagation()
 
-
 # ==========================================
 # /fwdrestricted - COMMAND FLOW
 # ==========================================
@@ -232,11 +286,12 @@ async def handle_restr_source(bot, message, user_id, state_info):
 # ==========================================
 # FINAL CONFIRMATION & TASK EXECUTION
 # ==========================================
-# FIX: Use group=-1 and raise StopPropagation to intercept this before plugins/public.py ignores it!
+# group=-1 processes this before public.py sees it. StopPropagation prevents it from double-triggering.
 @Client.on_callback_query(filters.regex(r'^range_confirm_restr_final_'), group=-1)
 async def restr_final_confirmation(bot, query):
     session_id = query.data.split('_')[-1]
     session = temp.RANGE_SESSIONS.pop(session_id, None)
+    
     if not session: 
         await query.answer("Session expired.", show_alert=True)
         raise StopPropagation
@@ -257,11 +312,11 @@ async def restr_final_confirmation(bot, query):
         f"<b>From:</b> <code>{session['from_title']}</code>\n"
         f"<b>To Chat ID:</b> <code>{session['to_chat_id']}</code>\n"
         f"<b>Range:</b> <code>{session['start_id']}</code> to <code>{session['end_id']}</code>\n\n"
-        "<i>Note: This process downloads files to the server and re-uploads them. Global filters and custom buttons apply.</i>"
+        "<i>Note: This process downloads files to the server and re-uploads them. Global filters, buttons, and thumbnails apply automatically.</i>"
     )
     
     await query.message.edit_text(text, reply_markup=markup)
-    raise StopPropagation # Prevents public.py from catching it and dropping it silently
+    raise StopPropagation
 
 @Client.on_callback_query(filters.regex(r'^start_restr_task_'))
 async def start_restr_task(bot, query):
