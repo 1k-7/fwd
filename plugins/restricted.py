@@ -14,7 +14,9 @@ from database import db
 from config import temp
 from plugins.test import CLIENT as PyClient, start_clone_bot
 from plugins.utils import STS, start_range_selection, edit_or_reply, get_readable_time
-from plugins.public import parse_message_input, custom_caption, get_size
+from plugins.public import parse_message_input
+from plugins.regix import custom_caption, get_size
+
 
 logger = logging.getLogger(__name__)
 
