@@ -7,9 +7,15 @@ import math
 import logging
 from uuid import uuid4
 
-# FIX: Import StopPropagation from pyrogram directly, not from errors
 from pyrogram import Client, filters, enums, StopPropagation
-from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from pyrogram.types import (
+    InlineKeyboardButton, 
+    InlineKeyboardMarkup,
+    InputMediaPhoto, 
+    InputMediaVideo, 
+    InputMediaDocument, 
+    InputMediaAudio
+)
 from pyrogram.errors import FloodWait, MessageNotModified
 
 # Import from existing modules safely
@@ -83,7 +89,9 @@ async def get_restr_configs(user_id):
     default = {
         'file_size': 0, # 0 means no limit
         'caption': None,
-        'delay': 2.0 # Higher default delay due to upload/download limits
+        'delay': 2.0,
+        'preserve_group': False,
+        'force_group': False
     }
     if user and 'restr_configs' in user:
         default.update(user['restr_configs'])
@@ -111,12 +119,16 @@ async def show_restr_settings(message, user_id):
     size_limit = configs.get('file_size', 0)
     display_size = f"{float(size_limit)/1048576:.2f} MB" if size_limit else "No Limit"
     delay = configs.get('delay', 2.0)
+    preserve = configs.get('preserve_group', False)
+    force = configs.get('force_group', False)
     
     text = (
         "<b>Restricted Forwarding Settings</b>\n\n"
         f"<b>Max File Size:</b> <code>{display_size}</code>\n"
         f"<b>Forward Delay:</b> <code>{delay} seconds</code>\n"
-        f"<b>Custom Caption:</b> {'Set' if configs.get('caption') else 'Not Set'}\n\n"
+        f"<b>Custom Caption:</b> {'Set' if configs.get('caption') else 'Not Set'}\n"
+        f"<b>Preserve Original Grouping:</b> {'✅ ON' if preserve else '❌ OFF'}\n"
+        f"<b>Always Force Groups of 10:</b> {'✅ ON' if force else '❌ OFF'}\n\n"
         "<i>These override global settings. Global filters, custom buttons, and thumbnails from /settings will automatically apply.</i>"
     )
     
@@ -124,9 +136,32 @@ async def show_restr_settings(message, user_id):
         [InlineKeyboardButton(f"Max Size: {display_size}", callback_data="restr_set_file_size")],
         [InlineKeyboardButton("Set Caption", callback_data="restr_set_caption"), 
          InlineKeyboardButton("Set Delay", callback_data="restr_set_delay")],
+        [InlineKeyboardButton(f"Preserve Groups: {'✅' if preserve else '❌'}", callback_data="restr_toggle_preserve_group")],
+        [InlineKeyboardButton(f"Force Group (10): {'✅' if force else '❌'}", callback_data="restr_toggle_force_group")],
         [InlineKeyboardButton("Close", callback_data="close_btn")]
     ]
     await edit_or_reply(message, text, reply_markup=InlineKeyboardMarkup(buttons))
+
+@Client.on_callback_query(filters.regex(r'^restr_toggle_'))
+async def restr_toggle_callback(bot, query):
+    user_id = query.from_user.id
+    setting_key = query.data.split('restr_toggle_')[1]
+    
+    configs = await get_restr_configs(user_id)
+    
+    if setting_key == "preserve_group":
+        new_val = not configs.get('preserve_group', False)
+        await update_restr_configs(user_id, 'preserve_group', new_val)
+        if new_val: # Conflict Prevention: Auto-disable force_group
+            await update_restr_configs(user_id, 'force_group', False)
+            
+    elif setting_key == "force_group":
+        new_val = not configs.get('force_group', False)
+        await update_restr_configs(user_id, 'force_group', new_val)
+        if new_val: # Conflict Prevention: Auto-disable preserve_group
+            await update_restr_configs(user_id, 'preserve_group', False)
+            
+    await show_restr_settings(query.message, user_id)
 
 @Client.on_callback_query(filters.regex(r'^restr_set_'))
 async def restr_set_callback(bot, query):
@@ -351,10 +386,12 @@ async def restricted_worker(bot, user_id, task_id, bot_data, restr_configs, mess
     start_id = min(i.start_id, i.end_id)
     end_id = max(i.start_id, i.end_id)
     
-    # 1. Gather all configs (Global & Restricted)
+    # Gather all configs (Global & Restricted)
     delay = restr_configs.get('delay', 2.0)
     size_limit = restr_configs.get('file_size', 0)
     restr_cap = restr_configs.get('caption')
+    preserve_group = restr_configs.get('preserve_group', False)
+    force_group = restr_configs.get('force_group', False)
     
     # Grab global filters, custom buttons, custom thumbnails, content protection
     _, global_cap, _, data_params, protect, button = await sts.get_data(user_id, bot_id=bot_data['id'])
@@ -366,6 +403,81 @@ async def restricted_worker(bot, user_id, task_id, bot_data, restr_configs, mess
     
     temp.ACTIVE_TASKS[user_id] = {task_id: {"process": message_obj, "details": {"type": "Restricted Forwarding", "from": str(i.FROM), "to": str(i.TO)}}}
     last_update = time.time()
+    
+    buffer = []
+    current_mg_id = None
+    
+    async def flush_buffer():
+        nonlocal buffer, current_mg_id
+        if not buffer: return
+        
+        success = False
+        attempts = 0
+        while attempts < 3 and not success:
+            try:
+                if len(buffer) == 1:
+                    item = buffer[0]
+                    fp, m, c = item['file_path'], item['msg'], item['caption']
+                    
+                    thumb_file = open(thumb_path, 'rb') if thumb_path else None
+                    send_args = {
+                        "chat_id": i.TO,
+                        "caption": c,
+                        "protect_content": protect
+                    }
+                    if button: send_args['reply_markup'] = button
+                    
+                    try:
+                        if m.photo: await client_instance.send_photo(photo=fp, **send_args)
+                        elif m.video: 
+                            if thumb_file: send_args['thumb'] = thumb_file
+                            await client_instance.send_video(video=fp, **send_args)
+                        elif m.document:
+                            if thumb_file: send_args['thumb'] = thumb_file
+                            await client_instance.send_document(document=fp, **send_args)
+                        elif m.audio:
+                            if thumb_file: send_args['thumb'] = thumb_file
+                            await client_instance.send_audio(audio=fp, **send_args)
+                        elif m.voice: await client_instance.send_voice(voice=fp, **send_args)
+                        elif m.animation:
+                            if thumb_file: send_args['thumb'] = thumb_file
+                            await client_instance.send_animation(animation=fp, **send_args)
+                        else: await client_instance.send_document(document=fp, **send_args)
+                    finally:
+                        if thumb_file: thumb_file.close()
+                else:
+                    # Send as a Media Group (Telegram restriction: max 10 items, no buttons)
+                    media_group = []
+                    for item in buffer:
+                        fp, m, c = item['file_path'], item['msg'], item['caption']
+                        if m.photo: media_group.append(InputMediaPhoto(fp, caption=c))
+                        elif m.video: media_group.append(InputMediaVideo(fp, caption=c))
+                        elif m.document: media_group.append(InputMediaDocument(fp, caption=c))
+                        elif m.audio: media_group.append(InputMediaAudio(fp, caption=c))
+                        else: media_group.append(InputMediaDocument(fp, caption=c))
+                        
+                    await client_instance.send_media_group(chat_id=i.TO, media=media_group, protect_content=protect)
+                
+                sts.add('total_files', len(buffer))
+                success = True
+            except FloodWait as e:
+                await asyncio.sleep(e.value + 1)
+                attempts += 1
+            except Exception as e:
+                logger.error(f"Error flushing buffer: {e}")
+                sts.add('failed', len(buffer))
+                break # Non-flood error, break loop
+                
+        if not success and attempts >= 3:
+            sts.add('failed', len(buffer))
+            
+        # Cleanup files from disk
+        for item in buffer:
+            if os.path.exists(item['file_path']):
+                try: os.remove(item['file_path'])
+                except: pass
+        buffer.clear()
+        current_mg_id = None
     
     try:
         # Download and format global custom thumbnail if it exists
@@ -386,7 +498,6 @@ async def restricted_worker(bot, user_id, task_id, bot_data, restr_configs, mess
                 await edit_restr_progress(message_obj, sts, "Running")
                 last_update = time.time()
             
-            file_path = None
             try:
                 messages = await client_instance.get_messages(i.FROM, [msg_id])
                 if not messages:
@@ -400,27 +511,35 @@ async def restricted_worker(bot, user_id, task_id, bot_data, restr_configs, mess
                 
                 sts.add('fetched')
                 
-                # --- Filter Check (Global Filters) ---
+                # Filter Check
                 msg_type_str = str(msg.media.value) if msg.media else "text"
                 if msg_type_str in filters_to_apply:
                     sts.add('filtered')
                     continue
                 
-                # Format Caption
                 capt = custom_caption(msg, final_caption)
                 
                 # --- Text Message ---
                 if not msg.media and msg.text:
-                    await client_instance.send_message(
-                        i.TO, 
-                        msg.text.html, 
-                        parse_mode=enums.ParseMode.HTML,
-                        reply_markup=button,
-                        protect_content=protect,
-                        disable_web_page_preview=True
-                    )
-                    sts.add('total_files')
-                    await asyncio.sleep(delay)
+                    await flush_buffer()
+                    # Retry logic for text sending
+                    success_txt = False
+                    for _ in range(3):
+                        try:
+                            await client_instance.send_message(
+                                i.TO, msg.text.html, parse_mode=enums.ParseMode.HTML,
+                                reply_markup=button, protect_content=protect, disable_web_page_preview=True
+                            )
+                            sts.add('total_files')
+                            success_txt = True
+                            await asyncio.sleep(delay)
+                            break
+                        except FloodWait as e:
+                            await asyncio.sleep(e.value + 1)
+                        except Exception as e:
+                            logger.error(f"Error text sending: {e}")
+                            break
+                    if not success_txt: sts.add('failed')
                     continue
                 
                 # --- Media Message ---
@@ -432,57 +551,56 @@ async def restricted_worker(bot, user_id, task_id, bot_data, restr_configs, mess
                             sts.add('filtered')
                             continue
                     
-                    # Download
                     file_path = await client_instance.download_media(msg)
                     if not file_path:
                         sts.add('failed')
                         continue
-                    
-                    send_args = {
-                        "chat_id": i.TO,
-                        "caption": capt,
-                        "reply_markup": button,
-                        "protect_content": protect
-                    }
-                    
-                    # Apply global custom thumbnail to the upload
-                    thumb_file = open(thumb_path, 'rb') if thumb_path else None
-                    
-                    try:
-                        if msg.photo:
-                            await client_instance.send_photo(photo=file_path, **send_args)
-                        elif msg.video:
-                            if thumb_file: send_args['thumb'] = thumb_file
-                            await client_instance.send_video(video=file_path, **send_args)
-                        elif msg.document:
-                            if thumb_file: send_args['thumb'] = thumb_file
-                            await client_instance.send_document(document=file_path, **send_args)
-                        elif msg.audio:
-                            if thumb_file: send_args['thumb'] = thumb_file
-                            await client_instance.send_audio(audio=file_path, **send_args)
-                        elif msg.voice:
-                            await client_instance.send_voice(voice=file_path, **send_args)
-                        elif msg.animation:
-                            if thumb_file: send_args['thumb'] = thumb_file
-                            await client_instance.send_animation(animation=file_path, **send_args)
-                        else:
-                            await client_instance.send_document(document=file_path, **send_args)
-                    finally:
-                        if thumb_file: thumb_file.close()
                         
-                    sts.add('total_files')
-                    await asyncio.sleep(delay)
+                    is_groupable = bool(msg.photo or msg.video or msg.document or msg.audio)
                     
-            except FloodWait as e:
-                await asyncio.sleep(e.value + 1)
-                sts.add('failed') # Simplify logic to avoid infinite loops
+                    # If it's Voice or Animation (not allowed in media groups by Telegram)
+                    if not is_groupable:
+                        await flush_buffer()
+                        buffer.append({'file_path': file_path, 'msg': msg, 'caption': capt})
+                        await flush_buffer()
+                        await asyncio.sleep(delay)
+                        continue
+                    
+                    # It is Groupable Media
+                    if preserve_group:
+                        if msg.media_group_id:
+                            if current_mg_id and current_mg_id != msg.media_group_id:
+                                await flush_buffer()
+                                await asyncio.sleep(delay)
+                            current_mg_id = msg.media_group_id
+                            buffer.append({'file_path': file_path, 'msg': msg, 'caption': capt})
+                            if len(buffer) == 10:
+                                await flush_buffer()
+                                await asyncio.sleep(delay)
+                        else:
+                            await flush_buffer()
+                            buffer.append({'file_path': file_path, 'msg': msg, 'caption': capt})
+                            await flush_buffer()
+                            await asyncio.sleep(delay)
+                            
+                    elif force_group:
+                        buffer.append({'file_path': file_path, 'msg': msg, 'caption': capt})
+                        if len(buffer) == 10:
+                            await flush_buffer()
+                            await asyncio.sleep(delay)
+                            
+                    else: # No grouping
+                        await flush_buffer()
+                        buffer.append({'file_path': file_path, 'msg': msg, 'caption': capt})
+                        await flush_buffer()
+                        await asyncio.sleep(delay)
+                    
             except Exception as e:
                 logger.error(f"Restricted forward error on {msg_id}: {e}")
                 sts.add('failed')
-            finally:
-                if file_path and os.path.exists(file_path):
-                    try: os.remove(file_path)
-                    except: pass
+                
+        # End of Range Loop
+        await flush_buffer()
                     
     except Exception as e:
         await edit_or_reply(message_obj, f"❌ **Fatal Error:** `{e}`")
