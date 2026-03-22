@@ -80,31 +80,48 @@ def parse_message_input(message):
     else:
         return None, None, "Invalid input. Please forward from a channel or provide a valid message link."
 
+def parse_button_markup(button_str):
+    if not button_str: return None
+    btns = []
+    try:
+        for line in button_str.split('\n'):
+            row = []
+            for btn in line.split(','):
+                parts = btn.split('|')
+                if len(parts) == 2:
+                    row.append(InlineKeyboardButton(parts[0].strip(), url=parts[1].strip()))
+            if row: btns.append(row)
+        return InlineKeyboardMarkup(btns) if btns else None
+    except: return None
+
 # ==========================================
 # DATABASE HELPERS FOR RESTRICTED SETTINGS
 # ==========================================
 async def get_restr_configs(user_id):
-    """Fetch specialized configurations for restricted forwarding."""
+    """Fetch specialized configurations for restricted forwarding. Completely isolated."""
     user = await db.col.find_one({'id': int(user_id)})
     default = {
-        'file_size': 0, # 0 means no limit
+        'file_size': 0, 
         'caption': None,
         'delay': 2.0,
         'preserve_group': False,
-        'force_group': False
+        'force_group': False,
+        'filters': [], # List of types to EXCLUDE
+        'thumbnail': None,
+        'button': None,
+        'protect': False
     }
     if user and 'restr_configs' in user:
         default.update(user['restr_configs'])
     return default
 
 async def update_restr_configs(user_id, key, value):
-    """Update specialized configurations."""
     configs = await get_restr_configs(user_id)
     configs[key] = value
     await db.col.update_one({'id': int(user_id)}, {'$set': {'restr_configs': configs}}, upsert=True)
 
 # ==========================================
-# /restrsettings - SETTINGS MENU
+# /restrsettings - FULL SETTINGS MENU
 # ==========================================
 @Client.on_message(filters.private & filters.command(['restrsettings']))
 async def restr_settings(client, message):
@@ -121,45 +138,85 @@ async def show_restr_settings(message, user_id):
     delay = configs.get('delay', 2.0)
     preserve = configs.get('preserve_group', False)
     force = configs.get('force_group', False)
+    protect = configs.get('protect', False)
     
     text = (
-        "<b>Restricted Forwarding Settings</b>\n\n"
+        "<b>🛡 Restricted Forwarding Settings</b>\n\n"
         f"<b>Max File Size:</b> <code>{display_size}</code>\n"
         f"<b>Forward Delay:</b> <code>{delay} seconds</code>\n"
-        f"<b>Custom Caption:</b> {'Set' if configs.get('caption') else 'Not Set'}\n"
+        f"<b>Protect Content:</b> {'✅ ON' if protect else '❌ OFF'}\n"
         f"<b>Preserve Original Grouping:</b> {'✅ ON' if preserve else '❌ OFF'}\n"
         f"<b>Always Force Groups of 10:</b> {'✅ ON' if force else '❌ OFF'}\n\n"
-        "<i>These override global settings. Global filters, custom buttons, and thumbnails from /settings will automatically apply.</i>"
+        "<i>Note: These settings are completely independent of your normal /settings.</i>"
     )
     
     buttons = [
-        [InlineKeyboardButton(f"Max Size: {display_size}", callback_data="restr_set_file_size")],
-        [InlineKeyboardButton("Set Caption", callback_data="restr_set_caption"), 
-         InlineKeyboardButton("Set Delay", callback_data="restr_set_delay")],
+        [InlineKeyboardButton("⚙️ Media Filters", callback_data="restr_menu_filters"),
+         InlineKeyboardButton("🖼 Custom Thumbnail", callback_data="restr_set_thumbnail")],
+        [InlineKeyboardButton("📝 Custom Caption", callback_data="restr_set_caption"),
+         InlineKeyboardButton("🔗 Custom Button", callback_data="restr_set_button")],
+        [InlineKeyboardButton(f"Protect Content: {'✅' if protect else '❌'}", callback_data="restr_toggle_protect")],
         [InlineKeyboardButton(f"Preserve Groups: {'✅' if preserve else '❌'}", callback_data="restr_toggle_preserve_group")],
         [InlineKeyboardButton(f"Force Group (10): {'✅' if force else '❌'}", callback_data="restr_toggle_force_group")],
+        [InlineKeyboardButton(f"Max Size: {display_size}", callback_data="restr_set_file_size"),
+         InlineKeyboardButton(f"Delay: {delay}s", callback_data="restr_set_delay")],
         [InlineKeyboardButton("Close", callback_data="close_btn")]
     ]
     await edit_or_reply(message, text, reply_markup=InlineKeyboardMarkup(buttons))
+
+@Client.on_callback_query(filters.regex(r'^restr_menu_filters$'))
+async def restr_filters_menu(bot, query):
+    configs = await get_restr_configs(query.from_user.id)
+    active = configs.get('filters', [])
+    types = ['text', 'photo', 'video', 'document', 'audio', 'voice', 'animation']
+    
+    btns = []
+    for t in types:
+        # If it is in "active" list, it means it is EXCLUDED
+        status = "❌" if t in active else "✅"
+        btns.append(InlineKeyboardButton(f"{t.capitalize()}: {status}", callback_data=f"restr_filter_{t}"))
+        
+    grid = [btns[i:i+2] for i in range(0, len(btns), 2)]
+    grid.append([InlineKeyboardButton("🔙 Back to Restricted Settings", callback_data="restr_settings_back")])
+    
+    await edit_or_reply(
+        query.message, 
+        "<b>⚙️ Restricted Media Filters</b>\n\n✅ = Will be forwarded\n❌ = Will be skipped", 
+        reply_markup=InlineKeyboardMarkup(grid)
+    )
+
+@Client.on_callback_query(filters.regex(r'^restr_filter_(.*)$'))
+async def restr_filter_toggle(bot, query):
+    user_id = query.from_user.id
+    t = query.matches[0].group(1)
+    configs = await get_restr_configs(user_id)
+    active = configs.get('filters', [])
+    
+    if t in active: active.remove(t)
+    else: active.append(t)
+        
+    await update_restr_configs(user_id, 'filters', active)
+    await restr_filters_menu(bot, query)
 
 @Client.on_callback_query(filters.regex(r'^restr_toggle_'))
 async def restr_toggle_callback(bot, query):
     user_id = query.from_user.id
     setting_key = query.data.split('restr_toggle_')[1]
-    
     configs = await get_restr_configs(user_id)
     
     if setting_key == "preserve_group":
         new_val = not configs.get('preserve_group', False)
         await update_restr_configs(user_id, 'preserve_group', new_val)
-        if new_val: # Conflict Prevention: Auto-disable force_group
-            await update_restr_configs(user_id, 'force_group', False)
+        if new_val: await update_restr_configs(user_id, 'force_group', False)
             
     elif setting_key == "force_group":
         new_val = not configs.get('force_group', False)
         await update_restr_configs(user_id, 'force_group', new_val)
-        if new_val: # Conflict Prevention: Auto-disable preserve_group
-            await update_restr_configs(user_id, 'preserve_group', False)
+        if new_val: await update_restr_configs(user_id, 'preserve_group', False)
+            
+    elif setting_key == "protect":
+        new_val = not configs.get('protect', False)
+        await update_restr_configs(user_id, 'protect', new_val)
             
     await show_restr_settings(query.message, user_id)
 
@@ -169,9 +226,11 @@ async def restr_set_callback(bot, query):
     setting_key = query.data.split('restr_set_')[1]
     
     prompts = {
-        "file_size": "Send the maximum file size in <b>MB</b> (e.g., 50 or 1.5). Files larger than this will be skipped.\nSend `0` for no limit.",
-        "caption": "Send your custom caption.\nUse `{filename}`, `{size}`, and `{caption}` as placeholders.\nSend `/reset` to remove.",
-        "delay": "Send the delay in seconds (e.g. 2.5). Recommended > 2s to avoid floodwaits."
+        "file_size": "Send max file size in <b>MB</b> (e.g., 50 or 1.5).\nSend `0` for no limit.",
+        "caption": "Send custom caption.\nPlaceholders: `{filename}`, `{size}`, `{caption}`.\nSend `/reset` to remove.",
+        "delay": "Send delay in seconds (e.g. 2.5).",
+        "button": "Send custom button markup.\nFormat: `Button Name | http://url.com`\nMultiple: `Btn1 | url1, Btn2 | url2`\nSend `/reset` to remove.",
+        "thumbnail": "Send a Photo to set as the custom thumbnail.\nSend `/reset` to remove."
     }
     
     prompt_msg = await edit_or_reply(query.message, prompts[setting_key], reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data="restr_settings_back")]]))
@@ -192,10 +251,8 @@ async def restr_input_handler(bot, message):
     if not state_info: return
 
     current_state = state_info.get("state", "")
-    if not current_state.startswith("awaiting_restr_"):
-        return # Not our state
+    if not current_state.startswith("awaiting_restr_"): return
 
-    # Handle /cancel
     if message.text and message.text.lower() == "/cancel":
         temp.USER_STATES.pop(user_id, None)
         await message.reply("Cancelled.")
@@ -205,7 +262,6 @@ async def restr_input_handler(bot, message):
     value = None
     
     if setting_key == "source":
-        # Handle source selection for /fwdrestricted
         await handle_restr_source(bot, message, user_id, state_info)
         message.stop_propagation()
         return
@@ -219,16 +275,22 @@ async def restr_input_handler(bot, message):
         try: value = float(message.text) * 1024 * 1024
         except: 
             await bot.send_message(user_id, "❌ Invalid number.")
-            message.stop_propagation()
-            return
+            message.stop_propagation(); return
     elif setting_key == "delay":
         try: value = float(message.text)
         except: 
             await bot.send_message(user_id, "❌ Invalid number.")
-            message.stop_propagation()
-            return
+            message.stop_propagation(); return
     elif setting_key == "caption":
         value = message.text
+    elif setting_key == "button":
+        value = message.text
+    elif setting_key == "thumbnail":
+        if message.photo: value = message.photo.file_id
+        elif message.document and message.document.thumbs: value = message.document.file_id
+        else:
+            await bot.send_message(user_id, "❌ Please send a valid photo.")
+            message.stop_propagation(); return
 
     await update_restr_configs(user_id, setting_key, value)
     temp.USER_STATES.pop(user_id, None)
@@ -253,7 +315,6 @@ async def fwd_restricted_cmd(bot, message):
     
     temp.USER_STATES.pop(user_id, None)
     
-    # We highly recommend userbots since bots cannot read restricted chats normally
     bots = await db.get_bots(user_id)
     userbots = [b for b in bots if not b.get('is_bot')]
     
@@ -315,17 +376,13 @@ async def handle_restr_source(bot, message, user_id, state_info):
         await status_msg.delete()
         return await bot.send_message(user_id, f"❌ Error verifying source: `{e}`\nEnsure the userbot is in the restricted chat.")
     
-    # FIX: Clear the state so it stops trapping your future messages!
     temp.USER_STATES.pop(user_id, None)
-    
     await start_range_selection(bot, status_msg, from_chat_id, from_title, to_chat_id, 1, end_id, final_callback_prefix="restr_final")
-
 
 
 # ==========================================
 # FINAL CONFIRMATION & TASK EXECUTION
 # ==========================================
-# group=-1 processes this before public.py sees it. StopPropagation prevents it from double-triggering.
 @Client.on_callback_query(filters.regex(r'^range_confirm_restr_final_'), group=-1)
 async def restr_final_confirmation(bot, query):
     session_id = query.data.split('_')[-1]
@@ -338,7 +395,6 @@ async def restr_final_confirmation(bot, query):
     user_id = query.from_user.id
     task_id = str(uuid4())
     
-    # Initialize STS for this run
     sts = STS(task_id).store(From=session['from_chat_id'], to=session['to_chat_id'], start_id=session['start_id'], end_id=session['end_id'])
     
     markup = InlineKeyboardMarkup([
@@ -351,7 +407,7 @@ async def restr_final_confirmation(bot, query):
         f"<b>From:</b> <code>{session['from_title']}</code>\n"
         f"<b>To Chat ID:</b> <code>{session['to_chat_id']}</code>\n"
         f"<b>Range:</b> <code>{session['start_id']}</code> to <code>{session['end_id']}</code>\n\n"
-        "<i>Note: This process downloads files to the server and re-uploads them. Global filters, buttons, and thumbnails apply automatically.</i>"
+        "<i>Note: Uses your /restrsettings completely independent of global settings.</i>"
     )
     
     await query.message.edit_text(text, reply_markup=markup)
@@ -373,13 +429,9 @@ async def start_restr_task(bot, query):
     
     bot_id = temp.FORWARD_BOT_ID.get(user_id)
     _bot_data = await db.get_bot(user_id, bot_id)
-    
-    # Get configurations
     restr_configs = await get_restr_configs(user_id)
     
     status_msg = await query.message.edit_text("`Initializing Restricted Runner...`")
-    
-    # Run in background
     asyncio.create_task(restricted_worker(bot, user_id, task_id, _bot_data, restr_configs, status_msg, sts))
 
 
@@ -390,19 +442,19 @@ async def restricted_worker(bot, user_id, task_id, bot_data, restr_configs, mess
     start_id = min(i.start_id, i.end_id)
     end_id = max(i.start_id, i.end_id)
     
-    # Gather all configs (Global & Restricted)
+    # 1. Gather STRICTLY ISOLATED Configs
     delay = restr_configs.get('delay', 2.0)
     size_limit = restr_configs.get('file_size', 0)
-    restr_cap = restr_configs.get('caption')
+    final_caption = restr_configs.get('caption')
     preserve_group = restr_configs.get('preserve_group', False)
     force_group = restr_configs.get('force_group', False)
+    protect = restr_configs.get('protect', False)
+    filters_to_apply = restr_configs.get('filters', [])
+    thumb_id = restr_configs.get('thumbnail')
     
-    # Grab global filters, custom buttons, custom thumbnails, content protection
-    _, global_cap, _, data_params, protect, button = await sts.get_data(user_id, bot_id=bot_data['id'])
+    button_raw = restr_configs.get('button')
+    button = parse_button_markup(button_raw) if button_raw else None
     
-    filters_to_apply = data_params.get('filters', [])
-    final_caption = restr_cap if restr_cap else global_cap
-    thumb_id = data_params.get('thumbnail')
     thumb_path = None
     
     temp.ACTIVE_TASKS[user_id] = {task_id: {"process": message_obj, "details": {"type": "Restricted Forwarding", "from": str(i.FROM), "to": str(i.TO)}}}
@@ -450,7 +502,6 @@ async def restricted_worker(bot, user_id, task_id, bot_data, restr_configs, mess
                     finally:
                         if thumb_file: thumb_file.close()
                 else:
-                    # Send as a Media Group (Telegram restriction: max 10 items, no buttons)
                     media_group = []
                     for item in buffer:
                         fp, m, c = item['file_path'], item['msg'], item['caption']
@@ -460,6 +511,7 @@ async def restricted_worker(bot, user_id, task_id, bot_data, restr_configs, mess
                         elif m.audio: media_group.append(InputMediaAudio(fp, caption=c))
                         else: media_group.append(InputMediaDocument(fp, caption=c))
                         
+                    # Telegram restriction: no buttons allowed on media groups
                     await client_instance.send_media_group(chat_id=i.TO, media=media_group, protect_content=protect)
                 
                 sts.add('total_files', len(buffer))
@@ -470,7 +522,7 @@ async def restricted_worker(bot, user_id, task_id, bot_data, restr_configs, mess
             except Exception as e:
                 logger.error(f"Error flushing buffer: {e}")
                 sts.add('failed', len(buffer))
-                break # Non-flood error, break loop
+                break 
                 
         if not success and attempts >= 3:
             sts.add('failed', len(buffer))
@@ -484,7 +536,7 @@ async def restricted_worker(bot, user_id, task_id, bot_data, restr_configs, mess
         current_mg_id = None
     
     try:
-        # Download and format global custom thumbnail if it exists
+        # Download isolated thumbnail
         if thumb_id:
             try:
                 thumb_path = await bot.download_media(thumb_id)
@@ -497,7 +549,6 @@ async def restricted_worker(bot, user_id, task_id, bot_data, restr_configs, mess
         for msg_id in range(start_id, end_id + 1):
             if temp.CANCEL.get(task_id): break
             
-            # Update UI occasionally
             if time.time() - last_update > 5:
                 await edit_restr_progress(message_obj, sts, "Running")
                 last_update = time.time()
@@ -515,7 +566,7 @@ async def restricted_worker(bot, user_id, task_id, bot_data, restr_configs, mess
                 
                 sts.add('fetched')
                 
-                # Filter Check
+                # ISOLATED Filter Check
                 msg_type_str = str(msg.media.value) if msg.media else "text"
                 if msg_type_str in filters_to_apply:
                     sts.add('filtered')
@@ -526,7 +577,6 @@ async def restricted_worker(bot, user_id, task_id, bot_data, restr_configs, mess
                 # --- Text Message ---
                 if not msg.media and msg.text:
                     await flush_buffer()
-                    # Retry logic for text sending
                     success_txt = False
                     for _ in range(3):
                         try:
@@ -562,7 +612,6 @@ async def restricted_worker(bot, user_id, task_id, bot_data, restr_configs, mess
                         
                     is_groupable = bool(msg.photo or msg.video or msg.document or msg.audio)
                     
-                    # If it's Voice or Animation (not allowed in media groups by Telegram)
                     if not is_groupable:
                         await flush_buffer()
                         buffer.append({'file_path': file_path, 'msg': msg, 'caption': capt})
@@ -570,7 +619,6 @@ async def restricted_worker(bot, user_id, task_id, bot_data, restr_configs, mess
                         await asyncio.sleep(delay)
                         continue
                     
-                    # It is Groupable Media
                     if preserve_group:
                         if msg.media_group_id:
                             if current_mg_id and current_mg_id != msg.media_group_id:
@@ -603,13 +651,11 @@ async def restricted_worker(bot, user_id, task_id, bot_data, restr_configs, mess
                 logger.error(f"Restricted forward error on {msg_id}: {e}")
                 sts.add('failed')
                 
-        # End of Range Loop
         await flush_buffer()
                     
     except Exception as e:
         await edit_or_reply(message_obj, f"❌ **Fatal Error:** `{e}`")
     finally:
-        # Cleanup Custom Thumbnail from server if exists
         if thumb_path and os.path.exists(thumb_path):
             try: os.remove(thumb_path)
             except: pass
@@ -617,7 +663,6 @@ async def restricted_worker(bot, user_id, task_id, bot_data, restr_configs, mess
         final_status = "Cancelled" if temp.CANCEL.get(task_id) else "Completed"
         await edit_restr_progress(message_obj, sts, final_status)
         
-        # Cleanup Active Trackers & Session
         if client_instance:
             try: await client_instance.stop()
             except: pass
