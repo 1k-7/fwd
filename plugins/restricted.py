@@ -315,7 +315,11 @@ async def handle_restr_source(bot, message, user_id, state_info):
         await status_msg.delete()
         return await bot.send_message(user_id, f"❌ Error verifying source: `{e}`\nEnsure the userbot is in the restricted chat.")
     
+    # FIX: Clear the state so it stops trapping your future messages!
+    temp.USER_STATES.pop(user_id, None)
+    
     await start_range_selection(bot, status_msg, from_chat_id, from_title, to_chat_id, 1, end_id, final_callback_prefix="restr_final")
+
 
 
 # ==========================================
